@@ -1,0 +1,55 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Proprietary owner data including balance and infrastructure state.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "balance": { "type": "number", "description": "Current active BTC yield (Total accumulated)." },
+        "internalWalletBalance": { "type": "number", "description": "Rewards strictly collected by the miner e-wallet." },
+        "lastSync": { "type": "string", "format": "date-time" },
+        "ownerTreasury": { "type": "number", "description": "Protocol cut treasury." },
+        "walletAddress": { "type": "string" },
+        "payoutEmail": { "type": "string" },
+        "isAiAutonomous": { "type": "boolean" },
+        "autoReinvest": { "type": "boolean" },
+        "protocolLevel": { "type": "number" },
+        "hwState": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "health": { "type": "number" },
+              "count": { "type": "number" }
+            }
+          }
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "balance", "updatedAt"]
+    },
+    "Log": {
+       "title": "Mining Log",
+       "description": "Event log for the mining cluster.",
+       "type": "object",
+       "properties": {
+         "time": { "type": "string" },
+         "msg": { "type": "string" },
+         "type": { "type": "string", "enum": ["success", "alert", "info", "network", "system"] },
+         "hashRate": { "type": "string" }
+       }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Root user profile document."
+    },
+    "/users/{userId}/logs/{logId}": {
+      "schema": "Log",
+      "description": "Individual event logs for history."
+    }
+  }
+}
