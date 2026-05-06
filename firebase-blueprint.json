@@ -8,13 +8,63 @@
         "email": { "type": "string" },
         "balance": { "type": "number", "description": "Current active BTC yield (Total accumulated)." },
         "internalWalletBalance": { "type": "number", "description": "Rewards strictly collected by the miner e-wallet." },
+        "githubConnected": { "type": "boolean", "description": "Whether the user's GitHub account is linked for version control." },
+        "cloudflareConnected": { "type": "boolean", "description": "Whether the user's Cloudflare account is linked for edge optimization." },
+        "phoneNumber": { "type": "string", "description": "User's mobile device number for SMS notifications." },
+        "miningUnits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+               "id": { "type": "string" },
+               "typeId": { "type": "string" },
+               "name": { "type": "string" },
+               "temp": { "type": "number" },
+               "fanSpeed": { "type": "number" },
+               "status": { "type": "string" },
+               "logs": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "multiAssetWallets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "coin": { "type": "string" },
+              "address": { "type": "string" },
+              "app": { "type": "string" },
+              "label": { "type": "string" },
+              "balance": { "type": "number" },
+              "minerActive": { "type": "boolean" },
+              "hashRate": { "type": "number" },
+              "progress": { "type": "number" },
+              "isVerified": { "type": "boolean" },
+              "lastTxHash": { "type": "string" },
+              "confirmations": { "type": "number" }
+            }
+          }
+        },
         "lastSync": { "type": "string", "format": "date-time" },
         "ownerTreasury": { "type": "number", "description": "Protocol cut treasury." },
         "walletAddress": { "type": "string" },
         "payoutEmail": { "type": "string" },
         "isAiAutonomous": { "type": "boolean" },
+        "isAjiPro": { "type": "boolean" },
+        "referralCode": { "type": "string" },
         "autoReinvest": { "type": "boolean" },
         "protocolLevel": { "type": "number" },
+        "settlementBatches": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "History of fiat off-ramp settlements."
+        },
+        "transactions": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "History of BTC on-chain transactions."
+        },
         "hwState": {
           "type": "array",
           "items": {

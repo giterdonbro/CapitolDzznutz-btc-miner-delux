@@ -5,11 +5,39 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
   --color-bitcoin: #F7931A;
+  
+  --color-app-bg: var(--app-bg);
+  --color-app-sidebar: var(--app-sidebar);
+  --color-app-header: var(--app-header);
+  --color-app-border: var(--app-border);
+  --color-app-card: var(--app-card);
+  --color-app-text-muted: var(--app-text-muted);
 }
 
 @layer base {
+  :root {
+    --app-bg: #FFFFFF;
+    --app-sidebar: #F9FAFB;
+    --app-card: #FFFFFF;
+    --app-header: rgba(255, 255, 255, 0.4);
+    --app-border: rgba(0, 0, 0, 0.05);
+    --app-text-muted: #71717A;
+  }
+
+  .dark {
+    --app-bg: #0A0A0A;
+    --app-sidebar: #0D0D0D;
+    --app-card: #0D0D0D;
+    --app-header: rgba(0, 0, 0, 0.4);
+    --app-border: rgba(255, 255, 255, 0.05);
+    --app-text-muted: #A1A1AA;
+  }
+
   body {
-    @apply bg-[#0A0A0A] text-white font-sans;
+    @apply bg-app-bg text-zinc-900 font-sans transition-colors duration-300;
+  }
+  .dark body {
+    @apply text-white;
   }
 }
 

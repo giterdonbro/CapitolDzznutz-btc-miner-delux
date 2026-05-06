@@ -1,6 +1,5 @@
 {
   "name": "CapitolDbro.org - Proprietary BTC Hub",
   "description": "The official infrastructure for CapitolDbro's proprietary Bitcoin mining clusters. Optimize yields, manage hardware, and scale your network.",
-  "requestFramePermissions": [],
-  "majorCapabilities": []
+  "requestFramePermissions": ["microphone"]
 }

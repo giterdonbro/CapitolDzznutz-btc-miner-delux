@@ -1,9 +1,12 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
+import { fileURLToPath } from 'url';
 import axios from "axios";
 import cors from "cors";
 import "dotenv/config";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
@@ -42,6 +45,15 @@ async function startServer() {
       res.json(response.data);
     } catch (error) {
       res.status(500).json({ error: "Failed to fetch address data" });
+    }
+  });
+
+  app.get("/api/btc/price", async (req, res) => {
+    try {
+      const response = await axios.get("https://blockchain.info/ticker");
+      res.json(response.data.USD);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch BTC price" });
     }
   });
 
@@ -108,18 +120,94 @@ async function startServer() {
     }
   });
 
+  // PayPal Payout Interface
+  app.post("/api/payout/paypal", async (req, res) => {
+    const { email, amount, currency = "USD" } = req.body;
+    const clientId = process.env.PAYPAL_CLIENT_ID;
+    const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      return res.status(401).json({
+        error: "PayPal infrastructure credentials missing.",
+        tip: "Please set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET in the settings to activate real payouts."
+      });
+    }
+
+    try {
+      // 1. Get Access Token
+      const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+      const authResponse = await axios.post(
+        'https://api-m.paypal.com/v1/oauth2/token',
+        'grant_type=client_credentials',
+        {
+          headers: {
+            'Authorization': `Basic ${auth}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        }
+      );
+
+      const accessToken = authResponse.data.access_token;
+
+      // 2. Create Payout
+      const payoutResponse = await axios.post(
+        'https://api-m.paypal.com/v1/payments/payouts',
+        {
+          sender_batch_header: {
+            sender_batch_id: `Payout_${Date.now()}`,
+            email_subject: "You have a payout from CapitolDbro Mining Hub",
+            email_message: "Your mining yield has been successfully settled to your PayPal account."
+          },
+          items: [
+            {
+              recipient_type: "EMAIL",
+              amount: {
+                value: amount.toFixed(2),
+                currency
+              },
+              note: "Mining yield settlement",
+              receiver: email,
+              sender_item_id: `Item_${Date.now()}`
+            }
+          ]
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      res.json({
+        status: "success",
+        batch_id: payoutResponse.data.batch_header.payout_batch_id,
+        message: "Payout batch initiated successfully."
+      });
+    } catch (error: any) {
+      console.error("PayPal Payout Error:", error?.response?.data || error.message);
+      res.status(500).json({
+        error: "PayPal API failed to process the request.",
+        details: error?.response?.data || error.message
+      });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.join(__dirname, 'dist');
+    console.log(`Serving static files from: ${distPath}`);
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      const indexPath = path.join(distPath, 'index.html');
+      res.sendFile(indexPath);
     });
   }
 
@@ -128,4 +216,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("Critical error during server startup:", err);
+  process.exit(1);
+});

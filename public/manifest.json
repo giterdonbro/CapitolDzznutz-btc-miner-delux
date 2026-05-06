@@ -1,0 +1,22 @@
+{
+  "name": "CapitolDbro Protocol",
+  "short_name": "CapitolDbro",
+  "description": "Proprietary AI-Powered Bitcoin Mining Cluster",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0A0A0A",
+  "theme_color": "#F7931A",
+  "icons": [
+    {
+      "src": "favicon.ico",
+      "sizes": "64x64",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "https://cdn.jsdelivr.net/npm/lucide-static@0.344.0/icons/zap.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

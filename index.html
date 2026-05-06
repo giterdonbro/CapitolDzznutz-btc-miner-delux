@@ -1,13 +1,73 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <script>
+      // Global and Fetch Fix for WalletConnect/AppKit environments
+      (function() {
+        // Define global if not exists
+        if (typeof window.global === 'undefined') {
+          window.global = window;
+        }
+
+        // Shims for process/Buffer often needed by web3 libraries
+        if (typeof window.process === 'undefined') {
+          window.process = { env: {}, nextTick: function(fn) { setTimeout(fn, 0); } };
+        }
+
+        // Fix for "TypeError: Cannot set property fetch of #<Window> which has only a getter"
+        // This error occurs when polyfills try to assign to window.fetch.
+        // We define a property with both getter and setter on window and globalThis.
+        (function(target) {
+          try {
+            let _fetch = target.fetch;
+            Object.defineProperty(target, 'fetch', {
+              get: function() { return _fetch; },
+              set: function(v) { _fetch = v; },
+              configurable: true,
+              enumerable: true
+            });
+          } catch (e) {
+            console.warn('Polyfill: Could not redefine fetch on target', target, e);
+          }
+        })(window);
+        
+        if (typeof globalThis !== 'undefined') {
+          (function(target) {
+            try {
+              let _fetch = target.fetch;
+              Object.defineProperty(target, 'fetch', {
+                get: function() { return _fetch; },
+                set: function(v) { _fetch = v; },
+                configurable: true,
+                enumerable: true
+              });
+            } catch (e) { }
+          })(globalThis);
+        }
+      })();
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <title>CapitolDbro - AI Mining Hub</title>
+    <link rel="manifest" href="/manifest.json">
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(reg => console.log('SW registered', reg))
+            .catch(err => console.log('SW failed', err));
+        });
+      }
+    </script>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#F7931A">
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js" async defer></script>
   </body>
 </html>
 

@@ -1,42 +1,82 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default deny
+    // 0. Default Deny Catch-all
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Global Helpers
-    function isSignedIn() { return request.auth != null; }
+    // 1. Primitive Helpers
+    function isSignedIn() { return request.auth != null && request.auth.token.email_verified == true; }
     function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
     function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
-    
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // 2. Main Match Blocks
     match /users/{userId} {
-      allow get: if isOwner(userId);
-      allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data) && (
-        request.resource.data.email == resource.data.email &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'internalWalletBalance', 'updatedAt', 'lastSync', 'hwState', 'ownerTreasury', 'autoReinvest', 'protocolLevel', 'isAiAutonomous'])
+      allow get: if isValidId(userId) && isOwner(userId);
+      
+      // 4. Creation Logic
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUser(incoming()) && (
+        incoming().keys().hasAll(['email', 'balance', 'updatedAt']) &&
+        incoming().email == request.auth.token.email &&
+        incoming().updatedAt == request.time
       );
 
+      // 5. Hardened Update Logic (Atomic Actions)
+      allow update: if isValidId(userId) && isOwner(userId) && isValidUser(incoming()) && (
+        incoming().email == existing().email &&
+        incoming().updatedAt == request.time &&
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'balance', 'internalWalletBalance', 'githubConnected', 'cloudflareConnected', 'phoneNumber', 
+            'multiAssetWallets', 'miningUnits', 'isAjiPro', 'referralCode', 
+            'ownerTreasury', 'payoutEmail', 'walletAddress', 'isAiAutonomous', 
+            'autoReinvest', 'protocolLevel', 'lastSync', 'hwState', 'settlementBatches', 'transactions', 'updatedAt'
+          ])
+        )
+      );
+
+      // 6. Logs (Master Gate)
       match /logs/{logId} {
         allow list: if isOwner(userId);
-        allow get: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidLog(request.resource.data);
+        allow get: if isValidId(logId) && isOwner(userId);
+        allow create: if isValidId(logId) && isOwner(userId) && isValidLog(incoming()) && (
+          incoming().keys().hasAll(['time', 'msg', 'type'])
+        );
       }
     }
 
+    // 7. Validation Helpers
     function isValidUser(data) {
-      return data.keys().hasAll(['email', 'balance', 'updatedAt']) &&
-             data.email is string &&
+      return data.email is string && data.email.size() <= 256 &&
              data.balance is number &&
              (data.keys().hasAny(['internalWalletBalance']) ? data.internalWalletBalance is number : true) &&
-             data.updatedAt == request.time;
+             (data.keys().hasAny(['githubConnected']) ? data.githubConnected is bool : true) &&
+             (data.keys().hasAny(['cloudflareConnected']) ? data.cloudflareConnected is bool : true) &&
+             (data.keys().hasAny(['phoneNumber']) ? data.phoneNumber is string && data.phoneNumber.size() <= 32 : true) &&
+             (data.keys().hasAny(['payoutEmail']) ? data.payoutEmail is string && data.payoutEmail.size() <= 256 : true) &&
+             (data.keys().hasAny(['walletAddress']) ? data.walletAddress is string && data.walletAddress.size() <= 128 : true) &&
+             (data.keys().hasAny(['isAiAutonomous']) ? data.isAiAutonomous is bool : true) &&
+             (data.keys().hasAny(['isAjiPro']) ? data.isAjiPro is bool : true) &&
+             (data.keys().hasAny(['referralCode']) ? data.referralCode is string && data.referralCode.size() <= 50 : true) &&
+             (data.keys().hasAny(['autoReinvest']) ? data.autoReinvest is bool : true) &&
+             (data.keys().hasAny(['protocolLevel']) ? data.protocolLevel is number : true) &&
+             (data.keys().hasAny(['ownerTreasury']) ? data.ownerTreasury is number : true) &&
+             (data.keys().hasAny(['lastSync']) ? data.lastSync is string : true) &&
+             (data.keys().hasAny(['settlementBatches']) ? data.settlementBatches is list && data.settlementBatches.size() <= 100 : true) &&
+             (data.keys().hasAny(['transactions']) ? data.transactions is list && data.transactions.size() <= 100 : true) &&
+             (data.keys().hasAny(['hwState']) ? data.hwState is list && data.hwState.size() <= 20 : true) &&
+             (data.keys().hasAny(['multiAssetWallets']) ? data.multiAssetWallets is list && data.multiAssetWallets.size() <= 50 : true) &&
+             (data.keys().hasAny(['miningUnits']) ? data.miningUnits is list && data.miningUnits.size() <= 100 : true);
     }
 
     function isValidLog(data) {
-      return data.keys().hasAll(['time', 'msg', 'type']) &&
-             data.msg.size() <= 500;
+      return data.msg is string && data.msg.size() <= 1000 &&
+             data.time is string &&
+             (data.keys().hasAny(['hashRate']) ? data.hashRate is string : true) &&
+             data.type in ['success', 'alert', 'info', 'network', 'system'];
     }
   }
 }

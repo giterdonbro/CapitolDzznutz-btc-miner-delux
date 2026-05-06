@@ -1,0 +1,88 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny Catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Primitive Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // 2. Main Match Blocks
+    match /users/{userId} {
+      // 3. Path Variable Hardening
+      allow get: if isValidId(userId) && isOwner(userId);
+      
+      // 4. Identity & Schema Enforced Creation
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUser(incoming()) && (
+        incoming().keys().hasAll(['email', 'balance', 'updatedAt']) &&
+        incoming().keys().size() >= 3 &&
+        incoming().email == request.auth.token.email &&
+        incoming().updatedAt == request.time
+      );
+
+      // 5. Action-Based Update Pattern (The Fortress)
+      allow update: if isValidId(userId) && isOwner(userId) && isValidUser(incoming()) && (
+        // Identity Integrity: Critical fields cannot be changed by the user once set (or must match auth)
+        incoming().email == existing().email &&
+        incoming().updatedAt == request.time &&
+
+        (
+          // Action: Balance Update (Yield accumulation)
+          (incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'updatedAt', 'lastSync'])) ||
+          
+          // Action: Internal Wallet Update
+          (incoming().diff(existing()).affectedKeys().hasOnly(['internalWalletBalance', 'updatedAt', 'lastSync', 'ownerTreasury'])) ||
+          
+          // Action: GitHub/Cloud Security Toggle
+          (incoming().diff(existing()).affectedKeys().hasOnly(['githubConnected', 'updatedAt', 'lastSync'])) ||
+          
+          // Action: Profile Update
+          (incoming().diff(existing()).affectedKeys().hasOnly(['phoneNumber', 'payoutEmail', 'updatedAt', 'lastSync'])) ||
+
+          // Action: Infrastructure Config
+          (incoming().diff(existing()).affectedKeys().hasOnly(['multiAssetWallets', 'miningUnits', 'hwState', 'autoReinvest', 'protocolLevel', 'isAiAutonomous', 'updatedAt', 'lastSync']))
+        )
+      );
+
+      // 6. Subcollections (Master Gate Pattern)
+      match /logs/{logId} {
+        allow list: if isOwner(userId);
+        allow get: if isValidId(logId) && isOwner(userId);
+        
+        // Relational Sync: Logs must belong to the user
+        allow create: if isValidId(logId) && isOwner(userId) && isValidLog(incoming()) && (
+          incoming().keys().hasAll(['time', 'msg', 'type']) &&
+          incoming().time is string &&
+          incoming().type in ['success', 'alert', 'info', 'network', 'system']
+        );
+      }
+    }
+
+    // 7. Validation Blueprints (Anti-Update-Gap)
+    function isValidUser(data) {
+      return data.email is string && data.email.size() <= 256 &&
+             data.balance is number &&
+             (data.keys().hasAny(['internalWalletBalance']) ? data.internalWalletBalance is number : true) &&
+             (data.keys().hasAny(['githubConnected']) ? data.githubConnected is bool : true) &&
+             (data.keys().hasAny(['phoneNumber']) ? data.phoneNumber is string && data.phoneNumber.size() <= 20 : true) &&
+             (data.keys().hasAny(['payoutEmail']) ? data.payoutEmail is string && data.payoutEmail.size() <= 256 : true) &&
+             (data.keys().hasAny(['multiAssetWallets']) ? data.multiAssetWallets is list && data.multiAssetWallets.size() <= 50 : true) &&
+             (data.keys().hasAny(['miningUnits']) ? data.miningUnits is list && data.miningUnits.size() <= 100 : true) &&
+             (data.keys().hasAny(['protocolLevel']) ? data.protocolLevel is number && data.protocolLevel <= 10 : true) &&
+             (data.keys().hasAny(['isAiAutonomous']) ? data.isAiAutonomous is bool : true) &&
+             (data.keys().hasAny(['autoReinvest']) ? data.autoReinvest is bool : true);
+    }
+
+    function isValidLog(data) {
+      return data.msg is string && data.msg.size() <= 1000 &&
+             data.time is string &&
+             data.type is string;
+    }
+  }
+}
