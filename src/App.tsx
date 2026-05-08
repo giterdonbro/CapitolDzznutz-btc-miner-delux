@@ -63,6 +63,8 @@ import { onAuthStateChanged } from 'firebase/auth';
 
 import { useAppKit } from '@reown/appkit/react';
 import { useAccount } from 'wagmi';
+import { useSDK } from '@metamask/sdk-react';
+import { PayPalButtons } from '@paypal/react-paypal-js';
 
 // Types
 interface HardwareUnit {
@@ -117,9 +119,11 @@ interface Transaction {
 }
 
 export default function App() {
+  const { sdk, connected: isMetaMaskConnected, account: defaultMetaMaskAccount } = useSDK();
   // Auth State
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const isInitialLoad = useRef(true);
 
   const { open } = useAppKit();
   const { address: connectedAddress, isConnected: isWalletConnected } = useAccount();
@@ -269,6 +273,7 @@ export default function App() {
   const [lastInternalSync, setLastInternalSync] = useState<number>(Date.now());
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [withdrawType, setWithdrawType] = useState<'BTC' | 'PayPal' | 'PYUSD'>('BTC');
+  const [adRevenue, setAdRevenue] = useState(142.50);
   const [payoutEmail, setPayoutEmail] = useState('chris.peterson1718@gmail.com');
   const [pyusdBalance, setPyusdBalance] = useState(0);
   const [paypalConnected, setPaypalConnected] = useState(true);
@@ -524,7 +529,7 @@ export default function App() {
       // Avoid infinite loop: ignore snapshots from our own pending writes
       if (docSnap.metadata.hasPendingWrites) return;
 
-      if (docSnap.exists()) {
+      if (docSnap.exists() && isInitialLoad.current) {
         const data = docSnap.data();
         if (data.balance !== undefined) setBalance(data.balance);
         if (data.ownerTreasury !== undefined) setOwnerTreasury(data.ownerTreasury);
@@ -607,6 +612,7 @@ export default function App() {
           updatedAt: serverTimestamp()
         });
       }
+      isInitialLoad.current = false;
     });
 
     return () => unsubscribe();
@@ -617,7 +623,7 @@ export default function App() {
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!user || isAuthLoading) return;
+    if (!user || isAuthLoading || isInitialLoad.current) return;
 
     if (syncTimer.current) clearTimeout(syncTimer.current);
     syncTimer.current = setTimeout(async () => {
@@ -1340,6 +1346,31 @@ export default function App() {
                       </li>
                     ))}
                   </ul>
+                </div>
+
+                <div className="pt-4">
+                  <PayPalButtons 
+                    createOrder={(data, actions) => {
+                      return actions.order.create({
+                        intent: "CAPTURE",
+                        purchase_units: [{
+                          amount: {
+                            currency_code: "USD",
+                            value: "499.00"
+                          }
+                        }]
+                      });
+                    }}
+                    onApprove={(data, actions) => {
+                      return actions.order!.capture().then(() => {
+                        setIsAjiPro(true);
+                        setShowProModal(false);
+                        notify("Executive Node Activated via PayPal", "success");
+                        speak("Executive Node Activated. Maximum bandwidth secured.");
+                      });
+                    }}
+                    style={{ layout: "horizontal", color: "blue", shape: "pill", label: "pay" }}
+                  />
                 </div>
 
                 <div className="space-y-3">
@@ -2787,7 +2818,7 @@ export default function App() {
                        </div>
 
                        <div className="p-6 bg-app-bg border border-app-border rounded-3xl space-y-4">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-2 gap-4">
                              <div className="p-4 bg-white/5 rounded-2xl border border-white/5">
                                 <p className="text-[10px] text-app-text-muted uppercase font-bold tracking-widest mb-1">Available Yield</p>
                                 <p className="text-xl font-bold dark:text-white text-zinc-900 font-mono tracking-tighter">
@@ -2798,25 +2829,25 @@ export default function App() {
                              <div className="p-4 bg-blue-600/5 rounded-2xl border border-blue-500/20">
                                 <p className="text-[10px] text-blue-500 uppercase font-bold tracking-widest mb-1">PYUSD Hub Balance</p>
                                 <p className="text-xl font-bold dark:text-white text-zinc-900 font-mono tracking-tighter">
-                                   ${pyusdBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                   ${(pyusdBalance + adRevenue).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                 </p>
-                                <p className="text-[10px] text-zinc-500 mt-1">Collateralized Stablecoin</p>
+                                <p className="text-[10px] text-zinc-500 mt-1">Stablecoin + Ad Rev</p>
                              </div>
                           </div>
                           <div className="flex justify-between items-start pt-4">
                              <div>
                                 <p className="text-[10px] text-app-text-muted uppercase font-bold tracking-widest mb-1">Settlement Liquidity</p>
                                 <p className="text-2xl font-bold dark:text-white text-zinc-900 font-mono tracking-tighter">
-                                   ${( ( (balance + internalWalletBalance) * btcPrice ) + pyusdBalance ).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                   ${( ( (balance + internalWalletBalance) * btcPrice ) + pyusdBalance + adRevenue ).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                 </p>
                              </div>
                              <div className="px-2 py-1 bg-green-500/10 rounded-lg border border-green-500/20 text-[9px] font-bold text-green-500 uppercase">
                                 Bridge Active
                              </div>
-                                                  <button 
-                             onClick={async () => {
-                               const amount = (balance + internalWalletBalance) * btcPrice;
-                               if (amount < 1) {
+                             <button 
+                               onClick={async () => {
+                                 const amount = ((balance + internalWalletBalance) * btcPrice) + pyusdBalance + adRevenue;
+                                 if (amount < 1) {
                                  notify("Minimum settlement requirement: $1.00 USD", "alert");
                                  return;
                                }
@@ -2839,6 +2870,8 @@ export default function App() {
 
                                  setBalance(0);
                                  setInternalWalletBalance(0);
+                                 setPyusdBalance(0);
+                                 setAdRevenue(0);
                                  const newBatch = {
                                    id: data.batch_id || Math.random().toString(36).substring(2, 8).toUpperCase(),
                                    amount,
@@ -3056,13 +3089,32 @@ export default function App() {
                     </div>
                   </div>
 
-                  <button 
-                    onClick={() => fetchRealBalance(walletAddress)}
-                    disabled={!walletAddress || isWalletLoading}
-                    className="w-full py-4 bg-bitcoin text-black rounded-xl font-bold shadow-[0_10px_30px_rgba(247,147,26,0.2)] hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:hover:scale-100"
-                  >
-                    {isWalletLoading ? "Syncing with Blockchain..." : "Link Real Wallet"}
-                  </button>
+                  <div className="flex gap-4">
+                    <button 
+                      onClick={() => fetchRealBalance(walletAddress)}
+                      disabled={!walletAddress || isWalletLoading}
+                      className="flex-1 py-4 bg-bitcoin text-black rounded-xl font-bold shadow-[0_10px_30px_rgba(247,147,26,0.2)] hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:hover:scale-100"
+                    >
+                      {isWalletLoading ? "Syncing with Blockchain..." : "Link Real Wallet"}
+                    </button>
+
+                    <button 
+                      onClick={async () => {
+                        try {
+                          const accounts = await sdk?.connect();
+                          if (accounts?.[0]) {
+                            setWalletAddress(accounts[0]);
+                            notify("MetaMask Wallet Connected", "success");
+                          }
+                        } catch(err: any) {
+                          notify("MetaMask Connection Failed: " + err.message, "alert");
+                        }
+                      }}
+                      className="flex-1 py-4 bg-[#F6851B] text-white rounded-xl font-bold shadow-[0_10px_30px_rgba(246,133,27,0.2)] hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2"
+                    >
+                      <Wallet size={16} /> Link MetaMask
+                    </button>
+                  </div>
                 </div>
 
                 <div className="bg-yellow-500/10 border border-yellow-500/20 p-4 rounded-xl flex gap-4 items-start">
@@ -3240,147 +3292,95 @@ export default function App() {
                 exit={{ opacity: 0, scale: 0.98 }}
                 className="space-y-8 max-w-5xl mx-auto"
               >
-                <div className="bg-gradient-to-br from-bitcoin/20 to-transparent border border-bitcoin/30 rounded-[2rem] p-12 text-center relative overflow-hidden">
+                <div className="bg-[#0D0D0D] border border-blue-500/30 rounded-[2rem] p-12 text-center relative overflow-hidden">
                    <div className="absolute top-0 right-0 p-4 opacity-5 rotate-12 translate-x-12 -translate-y-6">
-                      <Share2 size={200} />
+                      <Zap size={200} className="text-blue-500" />
                    </div>
-                   <h2 className="text-4xl font-bold mb-4">Proprietary Expansion Program</h2>
+                   <h2 className="text-4xl font-bold mb-4">Ad Monetization Engine</h2>
                    <p className="text-zinc-400 text-lg max-w-2xl mx-auto mb-10 leading-relaxed font-medium">
-                      Scale your proprietary network from Asheville to the world. Use these pre-verified assets to advertise your mining pool across TikTok, Instagram, and Facebook.
+                      Monetize your network idle time with premium ad inventory. Earn USD credits directly to your settlement multi-asset vault.
                    </p>
+                   
+                   <div className="bg-blue-600/10 border border-blue-500/20 rounded-2xl px-6 py-4 mx-auto max-w-xs mb-8">
+                      <p className="text-[10px] text-blue-500 uppercase font-bold tracking-widest">Global Ad Revenue</p>
+                      <p className="text-3xl font-bold font-mono text-white">${adRevenue.toFixed(2)}</p>
+                   </div>
                    
                    <div className="flex flex-wrap justify-center gap-4">
                       <button 
                         onClick={() => {
-                          const text = "Start building real wealth on CapitolDbro.org. Proprietary BTC clusters, AI-optimized yields. Join capitolD's elite pool today! ⚡️ #Bitcoin #Mining #PassiveIncome";
-                          window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent('https://CapitolDbro.org')}&quote=${encodeURIComponent(text)}`, '_blank');
+                          setAdRevenue(prev => prev + 1.25);
+                          notify("Ad Impression Logged: +$1.25", "success");
                         }}
-                        className="flex items-center gap-3 px-8 py-4 bg-[#1877F2] rounded-2xl font-bold text-sm uppercase tracking-widest hover:scale-105 transition-transform"
+                        className="px-12 py-5 bg-white text-black rounded-2xl font-bold text-sm uppercase tracking-[0.2em] hover:scale-105 active:scale-95 transition-all shadow-xl shadow-white/5"
                       >
-                         <img src="https://upload.wikimedia.org/wikipedia/commons/b/b8/2021_Facebook_icon.svg" className="w-5 h-5" alt="" />
-                         Facebook
+                         Engage Ad Inventory
                       </button>
-                      <button 
-                        onClick={() => {
-                          const text = "Scaling proprietary BTC revenue with @CapitolD420yo on CapitolDbro.org 🚀 Join the elite cluster now! #Bitcoin #Mining #PassiveYield";
-                          window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`, '_blank');
-                        }}
-                        className="flex items-center gap-3 px-8 py-4 bg-black border border-white/20 rounded-2xl font-bold text-sm uppercase tracking-widest hover:scale-105 transition-transform"
-                      >
-                         <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"></path></svg>
-                         Twitter / X
-                      </button>
-                      <button 
-                        onClick={() => {
-                          const text = "Build proprietary BTC revenue with CapitolDbro. Joint my elite cluster! 🚀 @CapitolD420yo";
-                          navigator.clipboard.writeText(text);
-                          notify("Ad Copy Copied for Instagram", "success");
-                        }}
-                        className="flex items-center gap-3 px-8 py-4 bg-gradient-to-tr from-[#FD1D1D] via-[#F56040] to-[#833AB4] rounded-2xl font-bold text-sm uppercase tracking-widest hover:scale-105 transition-transform"
-                      >
-                         <img src="https://upload.wikimedia.org/wikipedia/commons/e/e7/Instagram_logo_2016.svg" className="w-5 h-5" alt="" />
-                         Instagram
-                      </button>
-                      <button 
-                        onClick={() => {
-                          const text = "Join the CapitolDbro proprietary protocol. Real assets, AI-optimized yield. ⛏️ #CapitolDbro #CryptoMining";
-                          navigator.clipboard.writeText(text);
-                          notify("TikTok Blast Copy Saved", "success");
-                        }}
-                        className="flex items-center gap-3 px-8 py-4 bg-black border border-white/20 rounded-2xl font-bold text-sm uppercase tracking-widest hover:scale-105 transition-transform"
-                      >
-                         <img src="https://upload.wikimedia.org/wikipedia/en/a/a9/TikTok_logo.svg" className="w-5 h-5 invert" alt="" referrerPolicy="no-referrer" />
-                         TikTok
-                      </button>
+                      <div className="flex items-center gap-3 px-6 py-4 bg-white/5 rounded-2xl border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+                         <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                         Inventory Active: 14,221 Slots
+                      </div>
                    </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                    <div className="bg-[#0D0D0D] border border-white/10 rounded-3xl p-8">
-                      <h4 className="text-sm font-bold text-bitcoin uppercase tracking-widest mb-6 font-mono">Current Ad Campaign</h4>
+                      <h4 className="text-sm font-bold uppercase tracking-widest text-zinc-500 mb-6">Network Ad inventory</h4>
                       <div className="aspect-video rounded-2xl border border-white/5 bg-zinc-900 flex items-center justify-center overflow-hidden relative group">
-                         <div className="absolute inset-0 bg-bitcoin/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm">
-                            <span className="text-black font-bold uppercase tracking-widest text-xs">Download Creative Asset</span>
+                         <div className="absolute inset-0 bg-blue-500/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm">
+                            <span className="text-white font-bold uppercase tracking-widest text-xs">View Analytics Metadata</span>
                          </div>
                          <div className="text-center p-8">
-                            <Zap size={48} className="text-bitcoin mx-auto mb-4" />
-                            <p className="text-lg font-bold">"Proprietary Power. Real Results."</p>
-                            <p className="text-xs text-zinc-500 mt-2">CapitolDbro Official Banner</p>
+                            <Globe size={48} className="text-blue-500 mx-auto mb-4" />
+                            <p className="text-lg font-bold">Global Edge Propagation</p>
+                            <p className="text-xs text-zinc-500 mt-2">1,421 Active Monetization Slots</p>
                          </div>
                       </div>
                       <div className="mt-8 space-y-4">
                          <div className="flex justify-between items-center text-xs font-mono">
-                            <span className="text-zinc-500">Affiliate ID:</span>
-                            <span className="text-white">DBRO-ELITE-01</span>
+                            <span className="text-zinc-500">Inventory Status:</span>
+                            <span className="text-green-500">OPTIMIZED</span>
                          </div>
                          <div className="flex justify-between items-center text-xs font-mono">
-                            <span className="text-zinc-500">Contact:</span>
-                            <span className="text-white">{payoutEmail}</span>
+                            <span className="text-zinc-500">Payout Address:</span>
+                            <span className="text-white truncate max-w-[120px]">{payoutEmail}</span>
                          </div>
                       </div>
                    </div>
 
                    <div className="bg-[#0D0D0D] border border-white/10 rounded-3xl p-8">
-                      <h4 className="text-sm font-bold text-bitcoin uppercase tracking-widest mb-6 font-mono">Performance Analytics</h4>
-                      <div className="space-y-6">
+                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-6">Real-Time Monetization Logs</h4>
+                      <div className="space-y-4 font-mono text-[10px]">
                          {[
-                           { label: 'Total Impressions', val: '12,402' },
-                           { label: 'Click-Through Rate', val: '4.2%' },
-                           { label: 'Conversion Yield', val: '0.00045 BTC' },
-                         ].map(stat => (
-                           <div key={stat.label} className="border-b border-white/5 pb-4 last:border-0">
-                              <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono mb-1">{stat.label}</p>
-                              <p className="text-xl font-bold">{stat.val}</p>
+                           { event: 'Tier 1 Video Impression', val: '+$0.65', time: '1m ago' },
+                           { event: 'Sidebar Banner Metadata', val: '+$0.12', time: '8m ago' },
+                           { event: 'Sponsored Node Bonus', val: '+$5.00', time: '1h ago' },
+                           { event: 'Edge Click-Thru', val: '+$2.50', time: '4h ago' }
+                         ].map((log, i) => (
+                           <div key={i} className="flex justify-between items-center py-3 border-b border-white/5 last:border-0 opacity-70">
+                              <span className="text-zinc-400">{log.event}</span>
+                              <div className="text-right">
+                                 <span className="text-green-500 block">{log.val}</span>
+                                 <span className="text-zinc-600 text-[8px]">{log.time}</span>
+                              </div>
                            </div>
                          ))}
                       </div>
                    </div>
 
-                   <div className="bg-[#0D0D0D] border border-white/10 rounded-3xl p-8 md:col-span-2">
-                      <div className="flex items-center justify-between mb-8">
-                         <div>
-                            <h4 className="text-sm font-bold text-bitcoin uppercase tracking-widest font-mono">Cloudflare Gateway: CapitolDbro.org</h4>
-                            <p className="text-xs text-zinc-500 mt-1">Configuration for edge-authenticated proprietary access.</p>
+                   <div className="bg-[#0D0D0D] border border-white/10 rounded-3xl p-8 flex flex-col justify-between">
+                      <div>
+                         <h4 className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Autonomous Yield Tuning</h4>
+                         <p className="text-xl font-bold mb-6">Revenue Optimization</p>
+                         <div className="flex items-center gap-4 text-xs font-bold text-blue-500 animate-pulse">
+                            <div className="w-2 h-2 rounded-full bg-blue-500" />
+                            AUTO-AD CYCLING ENABLED
                          </div>
-                         <div className="px-3 py-1 bg-orange-500/10 border border-orange-500/30 rounded text-orange-400 text-[10px] font-bold uppercase">Cloudflare Proxied</div>
                       </div>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                         {[
-                           { type: 'CNAME', host: '@', value: 'ais-protocol.capitoldbro.org', status: 'READY' },
-                           { type: 'CNAME', host: 'www', value: 'ais-protocol.capitoldbro.org', status: 'READY' },
-                           { type: 'TXT', host: '_dbro-verify', value: 'dbro-auth-9921-2x', status: 'VERIFIED' },
-                         ].map(record => (
-                           <div key={record.host} className="p-4 bg-zinc-900 rounded-xl border border-white/5 font-mono">
-                              <div className="flex justify-between items-center mb-2">
-                                 <span className="text-[10px] font-bold px-1.5 py-0.5 bg-zinc-800 rounded text-zinc-400">{record.type}</span>
-                                 <span className="text-[10px] text-orange-500">{record.status}</span>
-                              </div>
-                              <div className="space-y-1">
-                                 <div>
-                                    <p className="text-[9px] text-zinc-500 uppercase tracking-tighter">Name (Subdomain)</p>
-                                    <p className="text-xs text-white">{record.host}</p>
-                                 </div>
-                                 <div>
-                                    <p className="text-[9px] text-zinc-500 uppercase tracking-tighter">Target (Hostname)</p>
-                                    <p className="text-xs text-white truncate">{record.value}</p>
-                                 </div>
-                                 <div className="flex justify-between items-center pt-2 border-t border-white/5">
-                                    <p className="text-[9px] text-zinc-500 uppercase tracking-tighter">Proxy Status</p>
-                                    <div className="flex items-center gap-1">
-                                       <div className="w-2 h-2 bg-orange-500 rounded-full"></div>
-                                       <span className="text-[10px] text-orange-500 font-bold uppercase">Proxied</span>
-                                    </div>
-                                 </div>
-                              </div>
-                           </div>
-                         ))}
-                      </div>
-                      <div className="mt-8 flex items-center justify-between p-4 bg-bitcoin/10 border border-bitcoin/20 rounded-2xl">
-                         <div className="flex items-center gap-3">
-                            <Monitor size={20} className="text-bitcoin" />
-                            <p className="text-xs text-zinc-200">Point your **@** and **www** CNAME records to **ais-protocol.capitoldbro.org** in Cloudflare. Ensure the **Orange Cloud (Proxied)** is enabled for security.</p>
-                         </div>
-                         <button className="text-[10px] font-bold text-bitcoin hover:underline uppercase tracking-widest">Setup Guide</button>
+                      <div className="mt-8 p-4 bg-blue-600/5 rounded-2xl border border-blue-500/20">
+                         <p className="text-[9px] text-zinc-400 leading-relaxed uppercase tracking-tighter">
+                            The CapitolDbro Revenue Optimization engine is automatically scaling your ad-throughput across 1,421 active edge nodes to ensure maximum CPM yield.
+                         </p>
                       </div>
                    </div>
                 </div>

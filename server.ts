@@ -125,6 +125,8 @@ async function startServer() {
     const { email, amount, currency = "USD" } = req.body;
     const clientId = process.env.PAYPAL_CLIENT_ID;
     const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
+    const mode = process.env.PAYPAL_MODE === "live" ? "live" : "sandbox";
+    const baseURL = mode === "live" ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com";
 
     if (!clientId || !clientSecret) {
       return res.status(401).json({
@@ -137,7 +139,7 @@ async function startServer() {
       // 1. Get Access Token
       const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
       const authResponse = await axios.post(
-        'https://api-m.paypal.com/v1/oauth2/token',
+        `${baseURL}/v1/oauth2/token`,
         'grant_type=client_credentials',
         {
           headers: {
@@ -151,10 +153,10 @@ async function startServer() {
 
       // 2. Create Payout
       const payoutResponse = await axios.post(
-        'https://api-m.paypal.com/v1/payments/payouts',
+        `${baseURL}/v1/payments/payouts`,
         {
           sender_batch_header: {
-            sender_batch_id: `Payout_${Date.now()}`,
+            sender_batch_id: `Payout_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
             email_subject: "You have a payout from CapitolDbro Mining Hub",
             email_message: "Your mining yield has been successfully settled to your PayPal account."
           },
@@ -162,7 +164,7 @@ async function startServer() {
             {
               recipient_type: "EMAIL",
               amount: {
-                value: amount.toFixed(2),
+                value: Number(amount).toFixed(2),
                 currency
               },
               note: "Mining yield settlement",
@@ -182,19 +184,22 @@ async function startServer() {
       res.json({
         status: "success",
         batch_id: payoutResponse.data.batch_header.payout_batch_id,
+        mode: mode,
         message: "Payout batch initiated successfully."
       });
     } catch (error: any) {
       console.error("PayPal Payout Error:", error?.response?.data || error.message);
+      const details = error?.response?.data || { message: error.message };
       res.status(500).json({
         error: "PayPal API failed to process the request.",
-        details: error?.response?.data || error.message
+        details: details
       });
     }
   });
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
+    console.log("[Development] Initializing Vite middleware...");
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -202,17 +207,26 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
+    // Identify dist path robustly
     const distPath = path.join(__dirname, 'dist');
-    console.log(`Serving static files from: ${distPath}`);
+    const indexPath = path.join(distPath, 'index.html');
+    console.log(`[Production] Serving static files from: ${distPath}`);
+    
     app.use(express.static(distPath));
+    
     app.get('*', (req, res) => {
-      const indexPath = path.join(distPath, 'index.html');
-      res.sendFile(indexPath);
+      res.sendFile(indexPath, (err) => {
+        if (err) {
+          console.error(`Error sending index.html from ${indexPath}: ${err.message}`);
+          res.status(500).send("Application not ready or build missing.");
+        }
+      });
     });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Proprietary Server running at http://localhost:${PORT}`);
+    console.log(`Proprietary Server running at http://0.0.0.0:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   });
 }
 
