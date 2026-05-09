@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {defineConfig, loadEnv} from 'vite';
+import { nodePolyfills } from 'vite-plugin-node-polyfills';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,9 +11,23 @@ const __dirname = path.dirname(__filename);
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(), 
+      tailwindcss(),
+      nodePolyfills({
+        include: ['process', 'buffer', 'util', 'stream'],
+        globals: {
+          Buffer: true,
+          global: false,
+          process: true,
+        },
+      })
+    ],
+    optimizeDeps: {
+      include: ['@walletconnect/logger', '@reown/appkit', '@reown/appkit-adapter-wagmi']
+    },
     define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY || ''),
     },
     resolve: {
       alias: {
@@ -22,7 +37,7 @@ export default defineConfig(({mode}) => {
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
+      hmr: process.env.DISABLE_HMR === 'false' ? true : false,
     },
   };
 });

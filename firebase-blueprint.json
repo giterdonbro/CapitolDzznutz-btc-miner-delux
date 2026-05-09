@@ -8,9 +8,15 @@
         "email": { "type": "string" },
         "balance": { "type": "number", "description": "Current active BTC yield (Total accumulated)." },
         "internalWalletBalance": { "type": "number", "description": "Rewards strictly collected by the miner e-wallet." },
+        "vaultBalance": { "type": "number", "description": "Secure Vault for locked yields and cold storage." },
         "githubConnected": { "type": "boolean", "description": "Whether the user's GitHub account is linked for version control." },
         "cloudflareConnected": { "type": "boolean", "description": "Whether the user's Cloudflare account is linked for edge optimization." },
         "phoneNumber": { "type": "string", "description": "User's mobile device number for SMS notifications." },
+        "isMining": { "type": "boolean", "description": "Whether the cloud mining protocol is active." },
+        "lastYieldUpdate": { "type": "string", "format": "date-time", "description": "Last time server-side yields were calculated." },
+        "autoPayoutEnabled": { "type": "boolean", "description": "Whether the system should automatically trigger payouts." },
+        "payoutThreshold": { "type": "number", "description": "The amount (in USD) at which an automatic payout is triggered." },
+        "vaultSweepEnabled": { "type": "boolean", "description": "Whether to automatically move funds to the vault." },
         "miningUnits": {
           "type": "array",
           "items": {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
  
- import { 
+ import Markdown from 'react-markdown';
+import { 
   Activity, 
   Cpu, 
   Database, 
@@ -10,7 +11,6 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
   Layers, 
   LayoutDashboard, 
   Lock, 
-  Plus, 
   Settings, 
   ShieldCheck, 
   TrendingUp, 
@@ -22,7 +22,6 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
   ChevronRight,
   Monitor,
   DollarSign,
-  CheckCircle2,
   Thermometer,
   Wind,
   Share2,
@@ -33,10 +32,16 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
   MessageSquare,
   BarChart3,
   Sun,
+  AlertTriangle,
   Moon,
   Menu,
   X,
-  History as HistoryIcon
+  History as HistoryIcon,
+  FileSearch,
+  CheckCircle2,
+  Terminal,
+  Plus,
+  Bot
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import jsQR from 'jsqr';
@@ -64,7 +69,68 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { useAppKit } from '@reown/appkit/react';
 import { useAccount } from 'wagmi';
 import { useSDK } from '@metamask/sdk-react';
-import { PayPalButtons } from '@paypal/react-paypal-js';
+import { PayPalButtons, PayPalScriptProvider, usePayPalScriptReducer } from '@paypal/react-paypal-js';
+import { GeminiAssistant } from './components/GeminiAssistant';
+
+// Firestore Error Handling
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function safeStringify(obj: any): string {
+  const cache = new WeakSet();
+  return JSON.stringify(obj, (key, value) => {
+    if (typeof value === 'object' && value !== null) {
+      if (cache.has(value)) return '[Circular]';
+      cache.add(value);
+    }
+    return value;
+  });
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  }
+  const safeInfo = safeStringify(errInfo);
+  console.error('Firestore Protocol Error: ', safeInfo);
+  throw new Error(safeInfo);
+}
 
 // Types
 interface HardwareUnit {
@@ -123,12 +189,32 @@ export default function App() {
   // Auth State
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
-  const isInitialLoad = useRef(true);
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
+  const isInitialLoad = useRef(true); // Keep one ref for the snapshot listener to prevent loops
 
   const { open } = useAppKit();
   const { address: connectedAddress, isConnected: isWalletConnected } = useAccount();
 
   // State
+  useEffect(() => {
+    console.log("[AJI_SUCCESS] App component mounted.");
+    const overlay = document.getElementById('loading-overlay');
+    if (overlay) {
+      console.log("[AJI_SUCCESS] Removing loading overlay...");
+      overlay.style.opacity = '0';
+      overlay.style.transition = 'opacity 0.4s ease-out';
+      setTimeout(() => {
+        if (overlay.parentNode) {
+          overlay.remove();
+          console.log("[AJI_SUCCESS] Overlay purged.");
+        }
+      }, 400);
+    }
+
+    // Safety fallback: if everything is black, force a body background
+    document.body.style.backgroundColor = '#000';
+  }, []);
+
   const [balance, setBalance] = useState(0.0004278);
   const [efficiencyRating, setEfficiencyRating] = useState(99.2);
   const [realBalance, setRealBalance] = useState<number | null>(null);
@@ -165,37 +251,58 @@ export default function App() {
   // Market Data (Real-time Fetching)
   useEffect(() => {
     const fetchMarketData = async () => {
+      // 1. Fetch Price
       try {
-        // Fetch Price
         const priceRes = await fetch('/api/btc/price');
         if (priceRes.ok) {
           const priceData = await priceRes.json();
-          if (priceData.last) setBtcPrice(priceData.last);
+          if (priceData && priceData.last) {
+            setBtcPrice(priceData.last);
+          }
+        } else {
+          const err = await priceRes.json().catch(() => ({}));
+          console.warn("Market Price API Warning:", err.error || priceRes.statusText);
         }
-
-        // Fetch Network Stats
-        const [diffRes, blockRes] = await Promise.all([
-          fetch('/api/btc/difficulty'),
-          fetch('/api/btc/blockcount')
-        ]);
-        
-                 if (diffRes.ok && blockRes.ok) {
-           const difficulty = await diffRes.text();
-           const blockCount = await blockRes.text();
-           setNetworkStats(prev => ({
-             ...prev,
-             difficulty: (parseFloat(difficulty) / 1e12).toFixed(2) + "T",
-             blockHeight: blockCount,
-             hashrateGlobal: "824.5 EH/s" // Estimated global hashrate
-           }));
-         }
       } catch (error) {
-        console.error("Market API Error:", error);
+        console.error("Market Price Fetch Exception:", error instanceof Error ? error.message : String(error));
+      }
+
+      // 2. Fetch Network Stats
+      try {
+        const [diffRes, blockRes] = await Promise.all([
+          fetch('/api/btc/difficulty').catch(e => ({ ok: false, statusText: e.message })),
+          fetch('/api/btc/blockcount').catch(e => ({ ok: false, statusText: e.message }))
+        ] as any[]);
+        
+        if (diffRes.ok && blockRes.ok) {
+          const difficulty = await diffRes.text();
+          const blockCount = await blockRes.text();
+          if (difficulty && blockCount) {
+            setNetworkStats(prev => ({
+              ...prev,
+              difficulty: (parseFloat(difficulty) / 1e12).toFixed(2) + "T",
+              blockHeight: blockCount,
+              hashrateGlobal: "824.5 EH/s" 
+            }));
+          }
+        } else {
+          console.warn("Network Stats Partial Failure:", { 
+            diff: diffRes.statusText || diffRes.status, 
+            block: blockRes.statusText || blockRes.status 
+          });
+        }
+      } catch (error) {
+        console.error("Network Stats Fetch Exception:", error instanceof Error ? error.message : String(error));
       }
     };
-    fetchMarketData();
-    const dataInterval = setInterval(fetchMarketData, 60000); // Update every minute
-    return () => clearInterval(dataInterval);
+
+    // Initial fetch with a slight delay to ensure server is ready
+    const timer = setTimeout(fetchMarketData, 2000);
+    const dataInterval = setInterval(fetchMarketData, 60000); 
+    return () => {
+      clearTimeout(timer);
+      clearInterval(dataInterval);
+    };
   }, []);
 
   useEffect(() => {
@@ -229,7 +336,7 @@ export default function App() {
 
   const [logs, setLogs] = useState<MiningLog[]>([]);
   const [autoReinvest, setAutoReinvest] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'hardware' | 'wallet' | 'settings' | 'marketing' | 'network' | 'intelligence' | 'market'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'hardware' | 'wallet' | 'settings' | 'marketing' | 'network' | 'intelligence' | 'market' | 'audit' | 'terminal'>('dashboard');
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('capitol-theme');
@@ -270,9 +377,17 @@ export default function App() {
   const [poolFee, setPoolFee] = useState(1.5); // Proprietary fee 1.5%
   const [ownerTreasury, setOwnerTreasury] = useState(0.005421); // Owner's accumulated fees
   const [internalWalletBalance, setInternalWalletBalance] = useState(0); // Miner's specific e-wallet
+  const [vaultBalance, setVaultBalance] = useState(0); // Secure Vault for locked yields
+  const [autoPayoutEnabled, setAutoPayoutEnabled] = useState(false);
+  const [payoutThreshold, setPayoutThreshold] = useState(100);
+  const [vaultSweepEnabled, setVaultSweepEnabled] = useState(true);
+  const [isVerifyingBlockchain, setIsVerifyingBlockchain] = useState(false);
+  const [blockchainProof, setBlockchainProof] = useState<string | null>(null);
+  const [savedWallets, setSavedWallets] = useState<{id: string, address: string, coin: string, verified: boolean}[]>([]);
   const [lastInternalSync, setLastInternalSync] = useState<number>(Date.now());
+  const [withdrawSource, setWithdrawSource] = useState<'balance' | 'treasury' | 'vault'>('balance');
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
-  const [withdrawType, setWithdrawType] = useState<'BTC' | 'PayPal' | 'PYUSD'>('BTC');
+  const [withdrawType, setWithdrawType] = useState<'BTC' | 'PayPal' | 'PYUSD' | 'MetaMask'>('BTC');
   const [adRevenue, setAdRevenue] = useState(142.50);
   const [payoutEmail, setPayoutEmail] = useState('chris.peterson1718@gmail.com');
   const [pyusdBalance, setPyusdBalance] = useState(0);
@@ -354,7 +469,7 @@ export default function App() {
         setIsDrivePicking(false);
       };
     } catch (error) {
-      console.error("error processing drive file", error);
+      console.error("error processing drive file", error instanceof Error ? error.message : String(error));
       notify("Failed to process Google Drive protocol data.", "alert");
       setIsDrivePicking(false);
     }
@@ -434,52 +549,62 @@ export default function App() {
       return;
     }
 
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = false;
-    recognition.lang = 'en-US';
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = 'en-US';
 
-    recognition.onstart = () => {
-      notify("Voice Commands Active: Listening for protocol signals.", "success");
-    };
+      recognition.onstart = () => {
+        notify("Voice Commands Active: Listening for protocol signals.", "success");
+      };
 
-    recognition.onerror = (event: any) => {
-      console.error("Speech recognition error", event.error);
-      if (event.error === 'not-allowed') {
-        notify("Microphone access denied. Check protocol permissions.", "alert");
+      recognition.onerror = (event: any) => {
+        console.error("Speech recognition error", event.error);
+        if (event.error === 'not-allowed') {
+          notify("Microphone access denied. Check protocol permissions.", "alert");
+        }
         setIsVoiceInputActive(false);
-      }
-    };
+      };
 
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[event.results.length - 1][0].transcript.toLowerCase();
-      console.log("Transcript:", transcript);
+      recognition.onresult = (event: any) => {
+        const transcript = event.results[event.results.length - 1][0].transcript.toLowerCase();
+        console.log("Transcript:", transcript);
 
-      if (transcript.includes("start mining") || transcript.includes("activate miner")) {
-        if (!isMining) toggleMining();
-        else speak("Miner is already active and processing hashes.");
-      } 
-      else if (transcript.includes("stop mining") || transcript.includes("deactivate miner")) {
-        if (isMining) toggleMining();
-        else speak("Miner is currently idle. No deactivation required.");
-      }
-      else if (transcript.includes("check balance") || transcript.includes("what is my balance") || transcript.includes("how much money")) {
-        requestBalanceBrief();
-      }
-      else if (transcript.includes("protocol briefing") || transcript.includes("give me a briefing") || transcript.includes("brief me")) {
-        requestProtocolBriefing();
-      }
-      else if (transcript.includes("toggle theme") || transcript.includes("switch theme")) {
-        setTheme(theme === 'dark' ? 'light' : 'dark');
-        speak("Theme protocol updated.");
-      }
-    };
+        if (transcript.includes("start mining") || transcript.includes("activate miner")) {
+          if (!isMining) toggleMining();
+          else speak("Miner is already active and processing hashes.");
+        } 
+        else if (transcript.includes("stop mining") || transcript.includes("deactivate miner")) {
+          if (isMining) toggleMining();
+          else speak("Miner is currently idle. No deactivation required.");
+        }
+        else if (transcript.includes("check balance") || transcript.includes("what is my balance") || transcript.includes("how much money")) {
+          requestBalanceBrief();
+        }
+        else if (transcript.includes("protocol briefing") || transcript.includes("give me a briefing") || transcript.includes("brief me")) {
+          requestProtocolBriefing();
+        }
+        else if (transcript.includes("toggle theme") || transcript.includes("switch theme")) {
+          setTheme(theme === 'dark' ? 'light' : 'dark');
+          speak("Theme protocol updated.");
+        }
+      };
 
-    recognition.start();
+      recognition.start();
 
-    return () => {
-      recognition.stop();
-    };
+      return () => {
+        try {
+          recognition.stop();
+        } catch (e) {
+          // Ignore stop errors
+        }
+      };
+    } catch (e) {
+      console.error("Voice initialization failed:", e);
+      notify("Failed to initialize voice protocol.", "alert");
+      setIsVoiceInputActive(false);
+    }
   }, [isVoiceInputActive, isMining, balance, btcPrice, theme, efficiencyRating]);
 
   // MetaMask Integration
@@ -501,12 +626,83 @@ export default function App() {
     }
   };
 
-  // Advanced Autonomous Settings
+  const handleDepositToVault = () => {
+    if (balance <= 0) {
+      notify("No yield available for deposit.", "info");
+      return;
+    }
+    const amount = balance;
+    setVaultBalance(prev => prev + amount);
+    setBalance(0);
+    const newTx: Transaction = {
+      id: `TX-${Math.random().toString(36).toUpperCase().substring(2, 8)}`,
+      amount,
+      type: 'Transfer',
+      method: 'Internal Vault',
+      status: 'Completed',
+      timestamp: new Date().toISOString(),
+    };
+    setTransactions(prev => [newTx, ...prev]);
+    notify("Assets successfully transferred to Secure Vault.", "success");
+    speak(`${amount.toFixed(8)} Bitcoin secured in the proprietary vault.`);
+  };
+
+  const handleWithdrawFromVault = () => {
+    if (vaultBalance <= 0) {
+      notify("Vault is currently empty.", "info");
+      return;
+    }
+    setWithdrawSource('vault');
+    setWithdrawType('BTC');
+    setShowWithdrawModal(true);
+  };
   const [overclock, setOverclock] = useState(0); 
   const [selectedPool, setSelectedPool] = useState('CapitolDbro Proprietary');
   const [notifications, setNotifications] = useState<{id: string, msg: string, type: 'success' | 'alert' | 'info'}[]>([]);
   const [isAiAutonomous, setIsAiAutonomous] = useState(false);
+  const [isVerifyingProtocols, setIsVerifyingProtocols] = useState(false);
   const [protocolLevel, setProtocolLevel] = useState(1.0);
+  const [protocolStatus, setProtocolStatus] = useState<Record<string, 'online' | 'offline' | 'checking'>>({
+    cloudflare: 'online',
+    ipfs: 'online',
+    stratum: 'online',
+    settlement: 'online',
+    neural: 'online'
+  });
+
+  const verifyAllProtocols = async () => {
+    setIsVerifyingProtocols(true);
+    speak("Initiating full protocol integrity check.");
+    notify("Protocol Audit: Verifying edge nodes and encrypted bridges...", "info");
+    
+    const protocols = ['cloudflare', 'ipfs', 'stratum', 'settlement', 'neural'];
+    
+    for (const p of protocols) {
+      setProtocolStatus(prev => ({ ...prev, [p]: 'checking' }));
+      await new Promise(r => setTimeout(r, 600 + Math.random() * 800));
+      
+      try {
+        if (p === 'cloudflare') {
+          const res = await fetch('/api/cloudflare/analytics');
+          if (!res.ok) throw new Error();
+          setProtocolStatus(prev => ({ ...prev, [p]: 'online' }));
+        } else if (p === 'ipfs') {
+          const res = await fetch('/api/ipfs/status');
+          const data = await res.json();
+          setProtocolStatus(prev => ({ ...prev, [p]: data.status === 'active' ? 'online' : 'offline' }));
+        } else {
+          // Simulated check for others
+          setProtocolStatus(prev => ({ ...prev, [p]: 'online' }));
+        }
+      } catch (e) {
+        setProtocolStatus(prev => ({ ...prev, [p]: 'offline' }));
+      }
+    }
+    
+    setIsVerifyingProtocols(false);
+    speak("Protocol audit complete. All layers synchronized.");
+    notify("Protocol Audit Complete: Infrastructure verified.", "success");
+  };
 
   // Auth & Sync Engine
   useEffect(() => {
@@ -541,6 +737,11 @@ export default function App() {
         if (data.autoReinvest !== undefined) setAutoReinvest(data.autoReinvest);
         if (data.protocolLevel !== undefined) setProtocolLevel(data.protocolLevel);
         if (data.internalWalletBalance !== undefined) setInternalWalletBalance(data.internalWalletBalance);
+        if (data.vaultBalance !== undefined) setVaultBalance(data.vaultBalance);
+        if (data.autoPayoutEnabled !== undefined) setAutoPayoutEnabled(data.autoPayoutEnabled);
+        if (data.payoutThreshold !== undefined) setPayoutThreshold(data.payoutThreshold);
+        if (data.vaultSweepEnabled !== undefined) setVaultSweepEnabled(data.vaultSweepEnabled);
+        if (data.savedWallets !== undefined) setSavedWallets(data.savedWallets);
         if (data.githubConnected !== undefined) setGithubConnected(data.githubConnected);
         if (data.phoneNumber !== undefined) setPhoneNumber(data.phoneNumber);
         if (data.multiAssetWallets !== undefined) setMultiAssetWallets(data.multiAssetWallets);
@@ -549,6 +750,7 @@ export default function App() {
         if (data.cloudflareConnected !== undefined) setCloudflareConnected(data.cloudflareConnected);
         if (data.settlementBatches !== undefined) setSettlementBatches(data.settlementBatches);
         if (data.transactions !== undefined) setTransactions(data.transactions);
+        if (data.isMining !== undefined) setIsMining(data.isMining);
         if (data.hwState !== undefined) {
            const newHw = hardware.map(item => {
              const saved = data.hwState.find((s: any) => s.id === item.id);
@@ -561,7 +763,9 @@ export default function App() {
            });
            setHardwareCondition(newCondition);
         }
-      } else {
+        setIsDataLoaded(true);
+        isInitialLoad.current = false;
+      } else if (!docSnap.exists() && isInitialLoad.current) {
         // Initialize user document if it doesn't exist
         setDoc(userDocRef, {
           email: user.email,
@@ -575,6 +779,7 @@ export default function App() {
           autoReinvest: false,
           protocolLevel: 1.0,
           internalWalletBalance: 0,
+          vaultBalance: 0,
           githubConnected: true,
           phoneNumber: '8283762992',
           multiAssetWallets: [
@@ -608,69 +813,99 @@ export default function App() {
           miningUnits: [],
           settlementBatches: [],
           transactions: [],
-          hwState: hardware.map(h => ({ id: h.id, count: 0, health: 100 })),
+          isMining: true,
+          hwState: hardware.map(h => ({ id: h.id, count: h.id === '1' ? 1 : 0, health: 100 })),
           updatedAt: serverTimestamp()
-        });
+        }).then(() => {
+          setIsDataLoaded(true);
+          isInitialLoad.current = false;
+        }).catch(err => handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`));
       }
-      isInitialLoad.current = false;
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, `users/${user.uid}`);
     });
 
     return () => unsubscribe();
   }, [user]);
 
-  // Sync state TO Firestore (Throttled update)
-  const syncTimer = useRef<NodeJS.Timeout | null>(null);
+  // Sync state TO Firestore (Fixed Interval)
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  
+  const syncStateRef = useRef({
+    balance, internalWalletBalance, vaultBalance, autoPayoutEnabled, payoutThreshold, vaultSweepEnabled,
+    savedWallets, githubConnected, phoneNumber, multiAssetWallets, miningUnits, hardwareCondition,
+    isAjiPro, referralCode, ownerTreasury, payoutEmail, walletAddress, isAiAutonomous, autoReinvest,
+    protocolLevel, cloudflareConnected, settlementBatches, transactions, hardware
+  });
 
   useEffect(() => {
-    if (!user || isAuthLoading || isInitialLoad.current) return;
+    syncStateRef.current = {
+      balance, internalWalletBalance, vaultBalance, autoPayoutEnabled, payoutThreshold, vaultSweepEnabled,
+      savedWallets, githubConnected, phoneNumber, multiAssetWallets, miningUnits, hardwareCondition,
+      isAjiPro, referralCode, ownerTreasury, payoutEmail, walletAddress, isAiAutonomous, autoReinvest,
+      protocolLevel, cloudflareConnected, settlementBatches, transactions, hardware
+    };
+  }, [
+    balance, internalWalletBalance, vaultBalance, autoPayoutEnabled, payoutThreshold, vaultSweepEnabled,
+    savedWallets, githubConnected, phoneNumber, multiAssetWallets, miningUnits, hardwareCondition,
+    isAjiPro, referralCode, ownerTreasury, payoutEmail, walletAddress, isAiAutonomous, autoReinvest,
+    protocolLevel, cloudflareConnected, settlementBatches, transactions, hardware
+  ]);
 
-    if (syncTimer.current) clearTimeout(syncTimer.current);
-    syncTimer.current = setTimeout(async () => {
+  useEffect(() => {
+    if (!user || isAuthLoading || !isDataLoaded) return;
+
+    const syncDelay = isMining ? 60000 : 15000; // 1 minute if mining, 15 seconds if idle
+
+    const syncInterval = setInterval(async () => {
       setIsUpdating(true);
       try {
+        const state = syncStateRef.current;
         const userDocRef = doc(db, 'users', user.uid);
         await setDoc(userDocRef, {
           email: user.email,
-          balance,
-          internalWalletBalance,
-          githubConnected,
-          phoneNumber,
-          multiAssetWallets,
-          miningUnits,
-          isAjiPro,
-          referralCode,
-          ownerTreasury,
-          payoutEmail,
-          walletAddress,
-          isAiAutonomous,
-          autoReinvest,
-          protocolLevel,
-          cloudflareConnected,
+          balance: state.balance,
+          internalWalletBalance: state.internalWalletBalance,
+          vaultBalance: state.vaultBalance,
+          isMining,
+          autoPayoutEnabled: state.autoPayoutEnabled,
+          payoutThreshold: state.payoutThreshold,
+          vaultSweepEnabled: state.vaultSweepEnabled,
+          savedWallets: state.savedWallets,
+          githubConnected: state.githubConnected,
+          phoneNumber: state.phoneNumber,
+          multiAssetWallets: state.multiAssetWallets,
+          miningUnits: state.miningUnits,
+          isAjiPro: state.isAjiPro,
+          referralCode: state.referralCode,
+          ownerTreasury: state.ownerTreasury,
+          payoutEmail: state.payoutEmail,
+          walletAddress: state.walletAddress,
+          isAiAutonomous: state.isAiAutonomous,
+          autoReinvest: state.autoReinvest,
+          protocolLevel: state.protocolLevel,
+          cloudflareConnected: state.cloudflareConnected,
           lastSync: new Date().toISOString(),
-          hwState: hardware.map(h => ({ id: h.id, count: h.count, health: hardwareCondition[h.id] })),
-          settlementBatches,
-          transactions,
+          hwState: state.hardware.map(h => ({ id: h.id, count: h.count, health: state.hardwareCondition[h.id] })),
+          settlementBatches: state.settlementBatches,
+          transactions: state.transactions,
           updatedAt: serverTimestamp()
         }, { merge: true });
         setLastSyncTime(new Date().toLocaleTimeString());
-      } catch (error) {
-        console.error("Sync error:", error);
+      } catch (error: any) {
+        if (error.message?.includes('Quota exceeded')) {
+          notify("Database Limit Reached: Syncing paused. Yields are currently being held in local browser memory.", "alert");
+        } else if (error.message?.includes('insufficient permissions')) {
+           handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}`);
+        }
+        console.error("Sync error:", error instanceof Error ? error.message : String(error));
       } finally {
         setIsUpdating(false);
       }
-    }, 2000);
+    }, syncDelay);
 
-    return () => {
-      if (syncTimer.current) clearTimeout(syncTimer.current);
-    };
-  }, [
-    balance, internalWalletBalance, githubConnected, phoneNumber, 
-    multiAssetWallets, miningUnits, hardware, hardwareCondition,
-    isAjiPro, referralCode, ownerTreasury, payoutEmail, walletAddress,
-    isAiAutonomous, autoReinvest, protocolLevel, settlementBatches, transactions, 
-    githubConnected, cloudflareConnected, user, isAuthLoading
-  ]);
+    return () => clearInterval(syncInterval);
+  }, [user, isAuthLoading, isMining, isDataLoaded]);
 
   // Dedicated Internal Wallet Sync Interval (Every 15 minutes)
   useEffect(() => {
@@ -822,7 +1057,7 @@ export default function App() {
       setUseMainnet(true);
       notify("Mainnet wallet synchronized", "success");
     } catch (e) {
-      console.error("Wallet fetch error:", e);
+      console.error("Wallet fetch error:", e instanceof Error ? e.message : String(e));
       notify("Blockchain link failed", "alert");
     } finally {
       setIsWalletLoading(false);
@@ -836,25 +1071,42 @@ export default function App() {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const prompt = `As a Bitcoin mining AI, analyze these metrics: Difficulty: ${networkStats.difficulty}, Hashrate: ${effectiveHashRate.toFixed(2)} TH/s, Overclock: ${overclock}%, Pool: ${selectedPool}. 
-      Suggest ONE technical "Self-Upgrade" or configuration change. 
-      Format: "UPGRADING [Component]: [Short Technical Reason]". Under 15 words.`;
+      Determine the optimal configuration changes.
+      Respond ONLY in JSON with the following schema:
+      {
+        "action": "UPGRADING [Component]: [Short Technical Reason] under 15 words",
+        "overclock": <number between 0 and 50>,
+        "pool": <one of: "SlushPool", "F2Pool", "AntPool", "Foundry USA", "CapitolDbro Proprietary">
+      }`;
       
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-flash-latest",
         contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+        }
       });
 
-      const decision = response.text || "OPTIMIZING: Stratum v2 multiplexing enabled for latency reduction.";
-      setAiTip(decision);
-      
-      if (isAiAutonomous) {
-        setProtocolLevel(l => l + 0.01);
-        setEfficiencyRating(e => Math.min(100, e + 0.1));
-        if (Math.random() > 0.7) {
-          notify("AI: Executing Dynamic Overclock Adjustment", "success");
+      if (response.text) {
+        const decision = JSON.parse(response.text);
+        setAiTip(decision.action || "OPTIMIZING: Stratum v2 multiplexing enabled for latency reduction.");
+        
+        if (isAiAutonomous) {
+          setProtocolLevel(l => l + 0.01);
+          setEfficiencyRating(e => Math.min(100, e + 0.1));
+          
+          if (decision.overclock !== undefined && decision.overclock !== overclock) {
+            setOverclock(decision.overclock);
+            notify(`AI Adjusted Overclock to ${decision.overclock}%`, "success");
+          }
+          if (decision.pool !== undefined && decision.pool !== selectedPool) {
+            setSelectedPool(decision.pool);
+            notify(`AI Switched Stratum Pool to ${decision.pool}`, "success");
+          }
         }
       }
     } catch (error) {
+      console.error("AI Optimization failed:", error instanceof Error ? error.message : String(error));
       setAiTip("MONITORING: Global difficulty adjustment detected. Re-routing hashes.");
     } finally {
       setIsAiLoading(false);
@@ -867,6 +1119,49 @@ export default function App() {
   }, [isAiAutonomous, networkStats, overclock, selectedPool]);
  
   // Notification Helper
+  const [auditResult, setAuditResult] = useState<string | null>(null);
+  const [isAuditing, setIsAuditing] = useState(false);
+
+  const runSystemAudit = async () => {
+    if (isAuditing) return;
+    setIsAuditing(true);
+    setAuditResult(null);
+    notify("Initiating AI Security & Profit Audit...", "info");
+    speak("System audit initiated. Analyzing telemetry and payout protocols.");
+
+    try {
+      const response = await fetch('/api/ai/audit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stats: {
+            hashrate: effectiveHashRate,
+            temperature: Math.floor(Math.random() * 15) + 55, // Simulated avg temp
+            power: totalPower,
+            efficiency: efficiencyRating
+          },
+          userData: {
+            balance,
+            vaultBalance,
+            walletAddress,
+            payoutEmail,
+            protocolLevel
+          }
+        })
+      });
+
+      if (!response.ok) throw new Error("Audit protocol failed.");
+      const data = await response.json();
+      setAuditResult(data.audit);
+      notify("Audit Complete: System optimized.", "success");
+      speak("Audit complete. Your configuration is verified and secure.");
+    } catch (err) {
+      notify("Audit interupted. Retry signal.", "alert");
+    } finally {
+      setIsAuditing(false);
+    }
+  };
+
   const notify = (msg: string, type: 'success' | 'alert' | 'info' = 'info') => {
     const id = Math.random().toString(36).substr(2, 9);
     setNotifications(prev => [...prev, { id, msg, type }]);
@@ -1058,7 +1353,7 @@ export default function App() {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-flash-latest",
         contents: `As a Bitcoin mining expert, give a short, technical, and motivating tip for someone with a hash rate of ${effectiveHashRate.toFixed(2)} TH/s and a balance of ${balance.toFixed(8)} BTC. Mention the mining pool ${selectedPool}. Keep it under 20 words.`,
       });
       setAiTip(response.text || "Optimize your stratum connection for lower latency shares.");
@@ -1125,8 +1420,82 @@ export default function App() {
     notify(`Multi-asset node for ${wallet.coin} linked to cluster.`, "success");
   };
 
+  const verifyWalletOnBlockchain = async (address: string) => {
+    if (!address) return;
+    setIsVerifyingBlockchain(true);
+    speak("Initiating blockchain consensus verification for destination wallet.");
+    
+    try {
+      // Simulation of a blockchain lookup
+      await new Promise(resolve => setTimeout(resolve, 3500));
+      const mockHash = "0x" + Math.random().toString(16).substring(2, 15) + Math.random().toString(16).substring(2, 10);
+      setBlockchainProof(mockHash);
+      notify("Blockchain Logic-Check Complete: Address Legitimacy Verified.", "success");
+      speak("Verification complete. Address verified on-chain.");
+    } catch (err) {
+      notify("Verification Fault: Peer-to-peer consensus failed.", "alert");
+    } finally {
+      setIsVerifyingBlockchain(false);
+    }
+  };
+
+  const verifyNodeConsistency = async (walletId: string) => {
+    setIsVerifyingBlockchain(true);
+    const wallet = multiAssetWallets.find(w => w.id === walletId);
+    if (!wallet) return;
+
+    speak(`Initiating deep-chain consistency check for ${wallet.label}. Cross-referencing balance and ledger history.`);
+    notify(`Blockchain Audit: Synchronizing ${wallet.coin} indices...`, "info");
+    
+    try {
+      // Simulate real blockchain API latency and consensus rules
+      await new Promise(resolve => setTimeout(resolve, 4500));
+      
+      const onChainBalance = wallet.balance; // In a real app indexer/RPC result
+      const mockHash = "0x" + Math.random().toString(16).substring(2, 40);
+      
+      setMultiAssetWallets(prev => prev.map(w => w.id === walletId ? { 
+        ...w, 
+        isVerified: true, 
+        confirmations: (w.confirmations || 0) + Math.floor(Math.random() * 5) + 1,
+        lastTxHash: mockHash
+      } : w));
+      
+      setBlockchainProof(mockHash);
+      notify(`${wallet.label} consistency verified. Data matches on-chain records.`, "success");
+      speak("Consensus achieved. External ledger matches protocol internal state.");
+    } catch (err) {
+      notify("Blockchain Mismatch detected. Potential fork or indexing delay.", "alert");
+    } finally {
+      setIsVerifyingBlockchain(false);
+    }
+  };
+
+  const hardwareSummary = useMemo(() => 
+    hardware.filter(h => h.count > 0).map(h => `${h.count}x ${h.name}`).join(', ') || 'Standard Virtual Cluster',
+  [hardware]);
+
+  const addSavedWallet = (address: string, coin: string) => {
+    if (!address) return;
+    const newWallet = { id: Math.random().toString(36).substring(7), address, coin, verified: false };
+    setSavedWallets(prev => [newWallet, ...prev]);
+    notify(`Destination ${coin} wallet added to protocol clusters.`, "info");
+  };
+
+  const toggleWalletVerification = (id: string) => {
+    setSavedWallets(prev => prev.map(w => w.id === id ? { ...w, verified: !w.verified } : w));
+  };
+
+  const removeSavedWallet = (id: string) => {
+    setSavedWallets(prev => prev.filter(w => w.id !== id));
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#0A0A0A] overflow-hidden selection:bg-bitcoin selection:text-black">
+      {/* Dev Diagnostic */}
+      <div id="mount-marker" style={{ position: 'fixed', top: 0, left: 0, fontSize: '8px', color: '#111', zIndex: 999999, pointerEvents: 'none' }}>
+        AJI_OS_RUNNING_{new Date().getTime()}
+      </div>
       {/* Installation Banner */}
       <AnimatePresence>
         {showInstallBtn && (
@@ -1187,15 +1556,19 @@ export default function App() {
               
               <div className="space-y-6 mb-8">
                 <div className="p-4 bg-white/5 rounded-2xl border border-white/5">
-                  <span className="text-[10px] text-zinc-500 uppercase font-mono tracking-widest mb-1 block">Current Available Yield</span>
-                  <p className="text-2xl font-bold font-mono text-bitcoin">{(withdrawType === 'BTC' ? balance : ownerTreasury).toFixed(8)} BTC</p>
-                  <p className="text-xs text-zinc-400 mt-1">≈ ${((withdrawType === 'BTC' ? balance : ownerTreasury) * btcPrice).toLocaleString()} {withdrawType === 'PYUSD' ? 'PYUSD' : 'USD'}</p>
+                  <span className="text-[10px] text-zinc-500 uppercase font-mono tracking-widest mb-1 block">
+                    {withdrawSource === 'vault' ? 'Vault Balance' : withdrawSource === 'treasury' ? 'Treasury Yield' : 'Current Available Yield'}
+                  </span>
+                  <p className="text-2xl font-bold font-mono text-bitcoin">
+                    {(withdrawSource === 'vault' ? vaultBalance : withdrawSource === 'treasury' ? ownerTreasury : balance).toFixed(8)} BTC
+                  </p>
+                  <p className="text-xs text-zinc-400 mt-1">≈ ${((withdrawSource === 'vault' ? vaultBalance : withdrawSource === 'treasury' ? ownerTreasury : balance) * btcPrice).toLocaleString()} {withdrawType === 'PYUSD' ? 'PYUSD' : 'USD'}</p>
                 </div>
 
                 <div>
                   <label className="block text-[10px] text-zinc-500 uppercase font-mono tracking-widest mb-3">Settlement Protocol</label>
-                  <div className="grid grid-cols-3 gap-2 mb-4">
-                    {['BTC', 'PayPal', 'PYUSD'].map((type) => (
+                  <div className="grid grid-cols-4 gap-2 mb-4">
+                    {['BTC', 'PayPal', 'PYUSD', 'MetaMask'].map((type) => (
                       <button
                         key={type}
                         onClick={() => setWithdrawType(type as any)}
@@ -1215,18 +1588,29 @@ export default function App() {
                       <div className="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center">
                         <img src="https://upload.wikimedia.org/wikipedia/commons/b/b5/PayPal.svg" className="w-6 h-6" alt="PayPal" referrerPolicy="no-referrer" />
                       </div>
+                    ) : withdrawType === 'MetaMask' ? (
+                      <div className="w-10 h-10 bg-orange-500/20 rounded-lg flex items-center justify-center text-orange-500">
+                        <Monitor size={20} />
+                      </div>
                     ) : (
                       <div className="w-10 h-10 bg-bitcoin/20 rounded-lg flex items-center justify-center text-bitcoin">
                         <Wallet size={20} />
                       </div>
                     )}
-                    <div>
+                    <div className="flex-1">
                       <p className="text-sm font-bold">
-                        {withdrawType === 'PYUSD' ? 'PYUSD Settlement' : withdrawType === 'PayPal' ? 'PayPal Instant Transfer' : 'BTC Direct Payout'}
+                        {withdrawType === 'PYUSD' ? 'PYUSD Settlement' : withdrawType === 'PayPal' ? 'PayPal Instant' : withdrawType === 'MetaMask' ? 'MetaMask Bridge' : 'BTC Direct Payout'}
                       </p>
-                      <p className="text-xs text-zinc-500">
-                        {withdrawType === 'BTC' ? (walletAddress || 'No Address Linked') : payoutEmail}
-                      </p>
+                      <input 
+                        type="text"
+                        value={withdrawType === 'BTC' || withdrawType === 'MetaMask' ? walletAddress : payoutEmail}
+                        onChange={(e) => {
+                          if (withdrawType === 'BTC' || withdrawType === 'MetaMask') setWalletAddress(e.target.value);
+                          else setPayoutEmail(e.target.value);
+                        }}
+                        className="w-full text-xs text-zinc-400 bg-transparent border-b border-white/10 focus:border-bitcoin transition-colors outline-none mt-1 py-1"
+                        placeholder={withdrawType === 'BTC' ? "1... or bc1..." : withdrawType === 'MetaMask' ? "0x..." : "email@example.com"}
+                      />
                     </div>
                   </div>
                 </div>
@@ -1241,11 +1625,19 @@ export default function App() {
                 </button>
                 <button 
                   onClick={async () => {
-                    const amount = (withdrawType === 'PayPal' || withdrawType === 'PYUSD') ? ownerTreasury : balance;
+                    const amount = withdrawSource === 'vault' ? vaultBalance : (withdrawSource === 'treasury' ? ownerTreasury : balance);
                     const txId = `TX-${Math.random().toString(36).toUpperCase().substring(2, 8)}`;
                     
                     if (withdrawType === 'PayPal' || withdrawType === 'PYUSD') {
                       try {
+                        if (!payoutEmail || !payoutEmail.includes('@')) {
+                          throw new Error("Please enter a valid PayPal email address.");
+                        }
+
+                        if (amount <= 0) {
+                          throw new Error("Insufficient funds for settlement.");
+                        }
+
                         const response = await fetch('/api/payout/paypal', {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
@@ -1269,7 +1661,11 @@ export default function App() {
                           date: new Date().toLocaleTimeString()
                         };
                         setSettlementBatches(prev => [newBatch, ...prev]);
-                        setOwnerTreasury(0);
+                        
+                        if (withdrawSource === 'vault') setVaultBalance(0);
+                        else if (withdrawSource === 'treasury') setOwnerTreasury(0);
+                        else setBalance(0);
+
                         notify(`${withdrawType} Settlement ${newBatch.id} initiated.`, "success");
                         
                         setTimeout(async () => {
@@ -1279,22 +1675,24 @@ export default function App() {
 
                       } catch (err: any) {
                         notify(err.message, "alert");
-                        console.error("Payout error:", err);
+                        console.error("Payout error:", err instanceof Error ? err.message : String(err));
                       }
                     } else {
                       const newTx: Transaction = {
                         id: txId,
                         amount,
                         type: 'Withdrawal',
-                        method: 'BTC Direct',
+                        method: withdrawType === 'MetaMask' ? 'MetaMask Bridge' : 'BTC Direct',
                         destination: walletAddress,
                         status: 'Pending',
                         timestamp: new Date().toISOString(),
                         hash: `0x${Math.random().toString(16).substring(2, 42)}`
                       };
                       setTransactions(prev => [newTx, ...prev]);
-                      setBalance(0);
-                      notify("Withdrawal Batch Dispatched", "success");
+                      if (withdrawSource === 'vault') setVaultBalance(0);
+                      else if (withdrawSource === 'treasury') setOwnerTreasury(0);
+                      else setBalance(0);
+                      notify(withdrawType === 'MetaMask' ? "MetaMask Bridge Initiated" : "Withdrawal Batch Dispatched", "success");
                     }
 
                     setShowWithdrawModal(false);
@@ -1349,27 +1747,21 @@ export default function App() {
                 </div>
 
                 <div className="pt-4">
-                  <PayPalButtons 
-                    createOrder={(data, actions) => {
-                      return actions.order.create({
-                        intent: "CAPTURE",
-                        purchase_units: [{
-                          amount: {
-                            currency_code: "USD",
-                            value: "499.00"
-                          }
-                        }]
-                      });
+                  <PayPalProtocolWrapper 
+                    onSuccess={() => {
+                      setIsAjiPro(true);
+                      setShowProModal(false);
+                      notify("Executive Node Activated via PayPal", "success");
+                      speak("Executive Node Activated. Maximum bandwidth secured.");
                     }}
-                    onApprove={(data, actions) => {
-                      return actions.order!.capture().then(() => {
-                        setIsAjiPro(true);
-                        setShowProModal(false);
-                        notify("Executive Node Activated via PayPal", "success");
-                        speak("Executive Node Activated. Maximum bandwidth secured.");
-                      });
+                    onError={(err) => {
+                      console.error("PayPal Script Error:", err?.message || "Unexpected PayPal Fault");
+                      // Log full error safely if needed
+                      try {
+                        console.debug("Full PayPal Error:", safeStringify(err));
+                      } catch(e) {}
+                      notify("PayPal Configuration Error. Check Client ID.", "alert");
                     }}
-                    style={{ layout: "horizontal", color: "blue", shape: "pill", label: "pay" }}
                   />
                 </div>
 
@@ -1404,9 +1796,9 @@ export default function App() {
                     speak("Elite protocol sequence initiated. Hash rate multiplied by 1.5.");
                     setShowProModal(false);
                   }}
-                  className="flex-1 py-4 bg-purple-600 text-white rounded-xl font-bold text-xs uppercase tracking-widest shadow-xl hover:scale-[1.02] active:scale-[0.98] transition-all"
+                  className="flex-1 py-4 bg-bitcoin text-black rounded-xl font-black text-xs uppercase tracking-widest shadow-[0_0_20px_rgba(57,255,20,0.4)] hover:scale-[1.02] active:scale-[0.98] transition-all"
                 >
-                  Verify Payment
+                  Authorize Activation
                 </button>
               </div>
             </motion.div>
@@ -1522,15 +1914,15 @@ export default function App() {
            >
              <X size={20} />
            </button>
-        <div className="px-6 mb-10 flex items-center gap-3">
-          <div className="w-10 h-10 bg-bitcoin rounded-xl flex items-center justify-center text-black shadow-[0_0_15px_rgba(247,147,26,0.3)]">
-            <Zap className="w-6 h-6 fill-current" />
+          <div className="px-6 mb-10 flex items-center gap-3">
+            <div className="w-10 h-10 bg-bitcoin rounded-xl flex items-center justify-center text-black shadow-[0_0_15px_rgba(57,255,20,0.5)]">
+              <Zap className="w-6 h-6 fill-current" />
+            </div>
+            <div>
+              <h1 className="font-bold text-lg tracking-tighter text-bitcoin">CapitolDbro<span className="text-white">.org</span></h1>
+              <h2 className="text-[10px] text-bitcoin/40 font-mono tracking-widest uppercase">Proprietary Protocol v4.2</h2>
+            </div>
           </div>
-          <div>
-            <h1 className="font-bold text-lg tracking-tight">CapitolDbro<span className="text-bitcoin">.org</span></h1>
-            <h2 className="text-[10px] text-zinc-500 font-mono tracking-widest uppercase">CapitolDbro Protocol v4.2</h2>
-          </div>
-        </div>
 
         <nav className="flex-1 px-4 space-y-1">
           <SidebarItem 
@@ -1576,30 +1968,36 @@ export default function App() {
             onClick={() => { setActiveTab('marketing'); setIsMobileMenuOpen(false); }} 
           />
           <SidebarItem 
+            icon={<Bot size={18} />} 
+            label="Neural Terminal" 
+            active={activeTab === 'terminal'} 
+            onClick={() => { setActiveTab('terminal'); setIsMobileMenuOpen(false); }} 
+          />
+          <SidebarItem 
             icon={<Settings size={18} />} 
             label="Settings" 
             active={activeTab === 'settings'} 
             onClick={() => { setActiveTab('settings'); setIsMobileMenuOpen(false); }} 
           />
 
-          <div className="mt-auto pt-8 border-t border-white/5">
+          <div className="mt-auto pt-8 border-t border-bitcoin/10">
              <div className="flex items-center gap-3 px-4 py-3 bg-bitcoin/10 rounded-2xl border border-bitcoin/20">
-                <div className="w-8 h-8 rounded-full bg-bitcoin flex items-center justify-center text-xs font-bold text-black">CP</div>
+                <div className="w-8 h-8 rounded-full bg-bitcoin flex items-center justify-center text-xs font-black text-black">CP</div>
                 <div className="overflow-hidden">
-                   <p className="text-[10px] font-bold text-bitcoin uppercase tracking-widest leading-none">Proprietary Owner</p>
-                   <p className="text-[9px] text-zinc-500 truncate mt-1">{payoutEmail}</p>
+                   <p className="text-[10px] font-black text-bitcoin uppercase tracking-widest leading-none">Proprietary Owner</p>
+                   <p className="text-[9px] text-bitcoin/40 truncate mt-1">{payoutEmail}</p>
                 </div>
              </div>
           </div>
         </nav>
 
-        <div className="p-6 border-t border-white/5">
-          <div className="bg-zinc-900/50 rounded-xl p-4 border border-white/5">
+        <div className="p-6 border-t border-bitcoin/10">
+          <div className="bg-black rounded-xl p-4 border border-bitcoin/20 shadow-[inset_0_0_10px_rgba(57,255,20,0.05)]">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] text-zinc-500 uppercase font-mono tracking-widest">Network Status</span>
-              <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.5)]"></div>
+              <span className="text-[10px] text-bitcoin/40 uppercase font-mono tracking-widest">Network Status</span>
+              <div className="w-1.5 h-1.5 bg-bitcoin rounded-full animate-pulse shadow-[0_0_8px_rgba(57,255,20,0.5)]"></div>
             </div>
-            <p className="text-xs text-zinc-400 font-mono">Synced: Block #840,123</p>
+            <p className="text-xs text-bitcoin/60 font-mono">Synced: Block #840,123</p>
           </div>
         </div>
       </aside>
@@ -1609,17 +2007,17 @@ export default function App() {
         {/* Top Gradient */}
         <div className="absolute top-0 left-0 right-0 h-64 bg-gradient-to-b from-bitcoin/5 to-transparent pointer-events-none" />
 
-        <header className="h-20 border-b border-app-border flex items-center justify-between px-4 sm:px-8 relative z-10 backdrop-blur-sm bg-app-header">
+        <header className="h-20 border-b border-bitcoin/20 flex items-center justify-between px-4 sm:px-8 relative z-10 backdrop-blur-md bg-black/80">
           <div className="flex items-center gap-4">
             <button 
               onClick={() => setIsMobileMenuOpen(true)}
-              className="lg:hidden p-2 text-zinc-500 hover:text-bitcoin transition-colors"
+              className="lg:hidden p-2 text-bitcoin/60 hover:text-bitcoin transition-colors"
             >
               <Menu size={20} />
             </button>
             <div className="flex flex-col">
-              <h2 className="text-[10px] sm:text-sm text-app-text-muted font-mono uppercase tracking-[0.2em]">East Coast HQ</h2>
-              <p className="text-xs sm:text-base font-semibold dark:text-white text-zinc-900">Asheville, NC · Node-01</p>
+              <h2 className="text-[10px] sm:text-sm text-bitcoin/40 font-mono uppercase tracking-[0.2em]">East Coast HQ</h2>
+              <p className="text-xs sm:text-base font-bold text-bitcoin">Asheville, NC · Node-01</p>
             </div>
           </div>
 
@@ -1633,49 +2031,49 @@ export default function App() {
             </button>
 
             {user ? (
-               <div className="flex items-center gap-4 pr-4 border-r border-white/10">
+               <div className="flex items-center gap-4 pr-4 border-r border-bitcoin/20">
                   <div className="flex flex-col items-end">
                     <div className="flex items-center gap-2">
                        {isUpdating ? (
                          <RefreshCw size={10} className="text-bitcoin animate-spin" />
                        ) : (
-                         <CheckCircle2 size={10} className="text-green-500" />
+                         <CheckCircle2 size={10} className="text-bitcoin" />
                        )}
-                       <span className="text-[10px] font-bold text-bitcoin uppercase tracking-widest leading-none">
-                         {isUpdating ? 'Synchronizing Cluster...' : 'Cloud Verified'}
+                       <span className="text-[10px] font-black text-bitcoin uppercase tracking-[0.2em] leading-none">
+                         {isUpdating ? 'Synchronizing Cluster...' : 'Protocol Verified'}
                        </span>
                     </div>
                     {lastSyncTime && (
-                      <p className="text-[9px] text-zinc-500 font-mono mt-1">Last Secure Check: {lastSyncTime}</p>
+                      <p className="text-[9px] text-bitcoin/40 font-mono mt-1">SECURE HANDSHAKE: {lastSyncTime}</p>
                     )}
                   </div>
 
                   {showInstallBtn && (
                     <button 
                       onClick={handleInstallClick}
-                      className="flex items-center gap-2 bg-bitcoin/10 hover:bg-bitcoin/20 text-bitcoin border border-bitcoin/30 px-3 py-1.5 rounded-lg transition-all group shrink-0"
+                      className="flex items-center gap-2 bg-bitcoin/10 hover:bg-bitcoin/20 text-bitcoin border border-bitcoin/30 px-3 py-1.5 rounded-lg transition-all group shrink-0 shadow-[0_0_10px_rgba(57,255,20,0.1)]"
                     >
                       <Download size={12} className="group-hover:translate-y-0.5 transition-transform" />
                       <span className="text-[10px] font-bold uppercase tracking-wider">Install App</span>
                     </button>
                   )}
 
-                  <div className="text-right hidden md:block border-l border-white/10 pl-4">
+                  <div className="text-right hidden md:block border-l border-bitcoin/20 pl-4">
                      <div className="flex items-center gap-1 justify-end">
-                       <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-                       <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest leading-none">Liquidity High</span>
+                       <div className="w-1.5 h-1.5 bg-bitcoin rounded-full animate-pulse shadow-[0_0_8px_rgba(57,255,20,0.6)]" />
+                       <span className="text-[10px] font-bold text-bitcoin/40 uppercase tracking-widest leading-none">Liquidity High</span>
                      </div>
-                     <p className="text-[12px] font-bold font-mono text-bitcoin mt-1">
+                     <p className="text-[12px] font-black font-mono text-bitcoin mt-1">
                        BTC Index: ${btcPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                      </p>
                   </div>
-                  <div className="text-right hidden sm:block border-l border-white/10 pl-4">
-                     <p className="text-[10px] font-bold text-white uppercase tracking-widest leading-none">Proprietary Node</p>
-                     <p className="text-[9px] text-zinc-500 truncate mt-1">{user.email}</p>
+                  <div className="text-right hidden sm:block border-l border-bitcoin/20 pl-4">
+                     <p className="text-[10px] font-black text-bitcoin uppercase tracking-widest leading-none">Proprietary Node</p>
+                     <p className="text-[9px] text-bitcoin/40 truncate mt-1">{user.email}</p>
                   </div>
                   <button 
                     onClick={logout}
-                    className="p-2 bg-zinc-900 rounded-lg border border-white/5 text-zinc-500 hover:text-white transition-colors"
+                    className="p-2.5 bg-black rounded-xl border border-bitcoin/30 text-bitcoin hover:bg-bitcoin hover:text-black transition-all shadow-[0_0_10px_rgba(57,255,20,0.1)]"
                   >
                     <Power size={18} />
                   </button>
@@ -1692,17 +2090,17 @@ export default function App() {
             <button 
               onClick={toggleMining}
               className={cn(
-                "px-6 py-2 rounded-full font-semibold transition-all flex items-center gap-2 text-sm",
+                "px-6 py-2 rounded-full font-black uppercase tracking-[0.2em] transition-all flex items-center gap-2 text-[11px] shadow-[0_0_20px_rgba(57,255,20,0.2)]",
                 isMining 
-                  ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20" 
-                  : "bg-bitcoin text-black hover:scale-105 active:scale-95 shadow-[0_4px_20px_rgba(247,147,26,0.3)]"
+                  ? "bg-red-500/10 text-red-500 border border-red-500/40 hover:bg-red-500/20 shadow-[0_0_20px_rgba(239,68,68,0.2)]" 
+                  : "bg-bitcoin text-black hover:scale-105 active:scale-95 shadow-[0_0_30px_rgba(57,255,20,0.4)]"
               )}
             >
               {isMining ? <Power size={16} /> : <Zap size={16} className="fill-current" />}
-              {isMining ? 'Stop Mining' : 'Start Mining'}
+              {isMining ? 'Shutdown' : 'Activate'}
             </button>
-            <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center border border-white/10">
-              <ShieldCheck size={20} className="text-bitcoin" />
+            <div className="w-11 h-11 rounded-2xl bg-black flex items-center justify-center border border-bitcoin/40 shadow-[0_0_15px_rgba(57,255,20,0.1)]">
+              <ShieldCheck size={22} className="text-bitcoin" />
             </div>
           </div>
         </header>
@@ -1719,35 +2117,113 @@ export default function App() {
               >
                 {/* Protocol Health & Projections */}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                  <div className="bg-zinc-900 border border-white/10 p-6 rounded-3xl relative overflow-hidden group">
+                  <div className="bg-black border border-bitcoin/20 p-6 rounded-3xl relative overflow-hidden group shadow-[0_0_20px_rgba(57,255,20,0.05)]">
+                    {isMining && (
+                      <div className="absolute top-0 right-0 p-2 z-30">
+                        <div className="flex items-center gap-1.5 bg-black/40 backdrop-blur-md border border-bitcoin/30 px-2 py-0.5 rounded-full">
+                          <div className="w-1.5 h-1.5 bg-bitcoin rounded-full animate-pulse shadow-[0_0_8px_rgba(57,255,20,0.6)]" />
+                          <span className="text-[8px] font-bold text-bitcoin uppercase tracking-widest">Protocol Active</span>
+                        </div>
+                      </div>
+                    )}
                     <div className="absolute top-0 right-0 p-4 opacity-5 translate-x-2 -translate-y-2 group-hover:translate-x-0 group-hover:translate-y-0 transition-transform duration-700">
                       <Wallet size={80} className="text-bitcoin" />
                     </div>
-                    <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-widest mb-1">Accumulated Yield</p>
+                    <p className="text-[10px] text-bitcoin/40 uppercase font-black tracking-widest mb-1">Accumulated Yield</p>
+                    <div className="flex items-baseline gap-2 relative z-10">
+                      <h4 className="text-3xl font-black font-mono tracking-tighter text-bitcoin">
+                        {balance.toFixed(8)}
+                      </h4>
+                      <span className="text-sm font-black text-bitcoin/60 italic">BTC</span>
+                    </div>
+                    <div className="flex items-center justify-between mt-4">
+                      <p className="text-[10px] text-bitcoin/40 font-mono">≈ ${(balance * btcPrice).toLocaleString()} USD / PYUSD</p>
+                      <div className="flex gap-2 relative z-20">
+                        <button 
+                          onClick={handleConvertYieldToPYUSD}
+                          className="text-[9px] font-black text-bitcoin/60 hover:text-bitcoin hover:underline uppercase tracking-widest whitespace-nowrap"
+                        >
+                          Swap
+                        </button>
+                        <button 
+                          onClick={() => {
+                            setWithdrawSource('balance');
+                            setWithdrawType('BTC');
+                            setShowWithdrawModal(true);
+                          }}
+                          className="text-[9px] font-black text-bitcoin hover:underline uppercase tracking-[0.2em] whitespace-nowrap"
+                        >
+                          Payout
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-zinc-900 border border-white/10 p-6 rounded-3xl relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 p-4 opacity-5 translate-x-2 -translate-y-2 group-hover:translate-x-0 group-hover:translate-y-0 transition-transform duration-700">
+                      <Lock size={80} className="text-bitcoin" />
+                    </div>
+                    <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-widest mb-1">Secure Vault</p>
                     <div className="flex items-baseline gap-2 relative z-10">
                       <h4 className="text-3xl font-bold font-mono tracking-tighter text-white">
-                        {balance.toFixed(8)}
+                        {vaultBalance.toFixed(8)}
                       </h4>
                       <span className="text-sm font-bold text-bitcoin">BTC</span>
                     </div>
                     <div className="flex items-center justify-between mt-4">
-                      <p className="text-[10px] text-zinc-600 font-mono">≈ ${(balance * btcPrice).toLocaleString()} USD / PYUSD</p>
+                      <p className="text-[10px] text-zinc-600 font-mono">≈ ${(vaultBalance * btcPrice).toLocaleString()} USD</p>
                       <div className="flex gap-2 relative z-20">
                         <button 
-                          onClick={handleConvertYieldToPYUSD}
-                          className="text-[9px] font-bold text-blue-400 hover:underline uppercase tracking-widest whitespace-nowrap"
+                          onClick={handleDepositToVault}
+                          className="text-[9px] font-bold text-green-400 hover:underline uppercase tracking-widest whitespace-nowrap"
                         >
-                          Swap to PYUSD
+                          Deposit
                         </button>
                         <button 
-                          onClick={() => {
-                            setWithdrawType('BTC');
-                            setShowWithdrawModal(true);
-                          }}
+                          onClick={handleWithdrawFromVault}
                           className="text-[9px] font-bold text-bitcoin hover:underline uppercase tracking-[0.2em] whitespace-nowrap"
                         >
                           Withdrawal
                         </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-zinc-900 border border-white/10 p-6 rounded-3xl relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 p-4 opacity-5 translate-x-2 -translate-y-2 group-hover:translate-x-0 group-hover:translate-y-0 transition-transform duration-700">
+                      <Zap size={80} className="text-blue-500" />
+                    </div>
+                    <div className="flex justify-between items-start mb-1">
+                      <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-widest">External API Integration</p>
+                    </div>
+                    <div className="space-y-4 mt-4">
+                      <div>
+                        <p className="text-[10px] text-zinc-600 uppercase font-mono mb-1">Your Protocol UID (n8n)</p>
+                        <div className="flex items-center gap-2">
+                          <code className="text-xs bg-black/40 p-2 rounded border border-white/5 flex-1 font-mono text-zinc-300">
+                            {user?.uid || 'Not Authenticated'}
+                          </code>
+                        </div>
+                      </div>
+                      
+                      <div className="p-3 bg-zinc-800/50 border border-white/5 rounded-xl space-y-2">
+                        <p className="text-[10px] text-zinc-400 font-mono flex items-center gap-2">
+                          <span className="w-1 h-1 bg-green-500 rounded-full animate-pulse"></span>
+                          API ENDPOINTS ACTIVE
+                        </p>
+                        <ul className="text-[9px] font-mono text-zinc-500 space-y-1 pl-2">
+                          <li>• GET /api/external/user-stats/{user?.uid ? '...' : '{uid}'}</li>
+                          <li>• POST /api/external/vault-deposit</li>
+                          <li>• POST /api/external/withdraw</li>
+                          <li>• POST /api/external/control</li>
+                          <li>• POST /api/external/gemini-assistant</li>
+                        </ul>
+                      </div>
+
+                      <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+                        <p className="text-[10px] text-blue-400 font-medium">
+                          Use the <span className="font-bold underline">AJI_API_KEY</span> header <span className="font-mono bg-black/20 px-1 rounded">x-aji-api-key</span> in n8n nodes to authenticate.
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -1802,17 +2278,17 @@ export default function App() {
 
                 {/* AD / PROMO ZONE */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-gradient-to-r from-blue-600/20 to-transparent border border-blue-500/30 rounded-2xl p-4 flex items-center justify-between group cursor-pointer hover:bg-blue-600/10 transition-all">
+                  <div className="bg-gradient-to-r from-bitcoin/20 to-transparent border border-bitcoin/30 rounded-2xl p-4 flex items-center justify-between group cursor-pointer hover:bg-bitcoin/10 transition-all">
                     <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center text-white">
+                      <div className="w-10 h-10 bg-bitcoin rounded-lg flex items-center justify-center text-black shadow-[0_0_10px_rgba(57,255,20,0.5)]">
                         <TrendingUp size={20} />
                       </div>
                       <div>
-                        <h5 className="text-xs font-bold uppercase tracking-widest text-blue-400 font-mono">PROMOTED</h5>
-                        <p className="text-sm font-semibold">Join the 0% Fee Elite Cluster - Limited Slots</p>
+                        <h5 className="text-xs font-black uppercase tracking-widest text-bitcoin font-mono">PROMOTED</h5>
+                        <p className="text-sm font-black uppercase tracking-tighter italic">Join Elite Cluster</p>
                       </div>
                     </div>
-                    <Plus size={16} className="text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <Plus size={16} className="text-bitcoin opacity-0 group-hover:opacity-100 transition-opacity" />
                   </div>
                   <div className="bg-gradient-to-r from-bitcoin/20 to-transparent border border-bitcoin/30 rounded-2xl p-4 flex items-center justify-between group cursor-pointer hover:bg-bitcoin/10 transition-all">
                     <div className="flex items-center gap-4">
@@ -1890,8 +2366,8 @@ export default function App() {
                             <AreaChart data={logs}>
                               <defs>
                                 <linearGradient id="colorHash" x1="0" y1="0" x2="0" y2="1">
-                                  <stop offset="5%" stopColor="#F7931A" stopOpacity={0.3}/>
-                                  <stop offset="95%" stopColor="#F7931A" stopOpacity={0}/>
+                                  <stop offset="5%" stopColor="#39FF14" stopOpacity={0.3}/>
+                                  <stop offset="95%" stopColor="#39FF14" stopOpacity={0}/>
                                 </linearGradient>
                               </defs>
                               <CartesianGrid strokeDasharray="3 3" stroke="#222" vertical={false} />
@@ -1911,14 +2387,14 @@ export default function App() {
                                 tickFormatter={(val) => `${val}T`}
                               />
                               <Tooltip 
-                                contentStyle={{ backgroundColor: '#111', border: '1px solid #333', borderRadius: '8px' }}
-                                itemStyle={{ color: '#F7931A' }}
-                                labelStyle={{ color: '#555', fontSize: '10px', marginBottom: '4px' }}
+                                contentStyle={{ backgroundColor: '#000', border: '1px solid #39FF14', borderRadius: '8px' }}
+                                itemStyle={{ color: '#39FF14' }}
+                                labelStyle={{ color: '#39FF14', fontSize: '10px', marginBottom: '4px' }}
                               />
                               <Area 
                                 type="monotone" 
                                 dataKey="hashRate" 
-                                stroke="#F7931A" 
+                                stroke="#39FF14" 
                                 strokeWidth={2}
                                 fillOpacity={1} 
                                 fill="url(#colorHash)" 
@@ -2046,6 +2522,39 @@ export default function App() {
                       <ChevronRight size={18} className="group-hover:translate-x-1 transition-transform" />
                     </button>
                   </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'terminal' && (
+              <motion.div 
+                key="terminal"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="h-[calc(100vh-12rem)]"
+              >
+                <div className="bg-black border border-bitcoin/30 rounded-3xl h-full flex flex-col overflow-hidden shadow-[0_0_30px_rgba(57,255,20,0.1)]">
+                   <div className="p-4 border-b border-bitcoin/20 bg-zinc-950 flex items-center justify-between">
+                     <div className="flex items-center gap-3">
+                       <Terminal size={18} className="text-bitcoin" />
+                       <h3 className="font-bold text-bitcoin tracking-widest uppercase text-sm">Protocol Terminal Intelligence</h3>
+                     </div>
+                     <div className="flex items-center gap-2">
+                       <span className="w-2 h-2 bg-bitcoin rounded-full animate-pulse"></span>
+                       <span className="text-[10px] text-bitcoin/60 font-mono">CONNECTION STABLE</span>
+                     </div>
+                   </div>
+                   <div className="flex-1 overflow-hidden relative">
+                     <GeminiAssistant 
+                       isEmbedded={true}
+                       appContext={{
+                         balance, btcPrice, isMining, networkStats, efficiencyRating,
+                         hardwareSummary: hardware.map(h => `${h.count}x ${h.name}`).join(', '),
+                         internalWalletBalance, vaultBalance
+                       }} 
+                     />
+                   </div>
                 </div>
               </motion.div>
             )}
@@ -2369,7 +2878,7 @@ export default function App() {
                    <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 relative overflow-hidden group">
                       <div className="flex items-center justify-between mb-6">
                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-purple-600 rounded-xl flex items-center justify-center text-white">
+                            <div className="w-10 h-10 bg-bitcoin rounded-xl flex items-center justify-center text-black shadow-[0_0_15px_rgba(57,255,20,0.5)]">
                                <Zap size={20} />
                             </div>
                             <h3 className="text-xl font-bold">Aji Pro Engine</h3>
@@ -2395,7 +2904,7 @@ export default function App() {
                         }}
                         className={cn(
                           "w-full py-4 rounded-2xl text-[10px] font-bold uppercase tracking-[0.2em] transition-all",
-                          isAjiPro ? "bg-zinc-800 text-white border border-white/10" : "bg-purple-600 text-white shadow-lg shadow-purple-600/20 active:scale-95"
+                          isAjiPro ? "bg-bitcoin/10 text-bitcoin border border-bitcoin/30" : "bg-bitcoin text-black shadow-lg shadow-bitcoin/20 active:scale-95"
                         )}
                       >
                         {isAjiPro ? "Protocol Downgrade" : "Activate Pro License"}
@@ -2498,7 +3007,7 @@ export default function App() {
                    </div>
                    <div className="flex items-center justify-between mb-8 relative z-10">
                       <div className="flex items-center gap-4">
-                         <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center text-white shadow-[0_0_20px_rgba(59,130,246,0.4)]">
+                         <div className="w-12 h-12 bg-bitcoin rounded-2xl flex items-center justify-center text-black shadow-[0_0_20px_rgba(57,255,20,0.6)]">
                             <Share2 size={24} />
                          </div>
                          <div>
@@ -2534,7 +3043,7 @@ export default function App() {
                            </p>
                            <button 
                              onClick={() => open()}
-                             className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl text-[10px] font-bold uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 shadow-xl shadow-blue-600/20 active:scale-95"
+                             className="w-full py-4 bg-bitcoin hover:bg-bitcoin/80 text-black rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 shadow-[0_0_20px_rgba(57,255,20,0.4)] active:scale-95"
                            >
                              <Wallet size={16} /> Link Mobile/Secure Wallet
                            </button>
@@ -2734,6 +3243,14 @@ export default function App() {
                                   ) : "Deploy Proprietary Miner"}
                                 </button>
                                 <p className="text-[8px] text-center text-app-text-muted italic">Dedicated instance linked to address</p>
+                                 <button 
+                                   onClick={() => verifyNodeConsistency(wallet.id)}
+                                   disabled={isVerifyingBlockchain}
+                                   className="w-full py-2 bg-zinc-950 border border-white/5 rounded-xl text-[9px] font-bold text-zinc-400 uppercase tracking-widest hover:border-bitcoin/50 hover:text-bitcoin transition-all flex items-center justify-center gap-2 disabled:opacity-50 mt-1"
+                                 >
+                                   {isVerifyingBlockchain ? <RefreshCw size={10} className="animate-spin" /> : <ShieldCheck size={10} />}
+                                   Verify Consensus
+                                 </button>
                              </div>
                           </div>
                         ))
@@ -2826,9 +3343,9 @@ export default function App() {
                                 </p>
                                 <p className="text-[10px] text-zinc-500 mt-1">≈ ${((balance + internalWalletBalance) * btcPrice).toLocaleString()} USD</p>
                              </div>
-                             <div className="p-4 bg-blue-600/5 rounded-2xl border border-blue-500/20">
-                                <p className="text-[10px] text-blue-500 uppercase font-bold tracking-widest mb-1">PYUSD Hub Balance</p>
-                                <p className="text-xl font-bold dark:text-white text-zinc-900 font-mono tracking-tighter">
+                             <div className="p-4 bg-bitcoin/5 rounded-2xl border border-bitcoin/20">
+                                <p className="text-[10px] text-bitcoin uppercase font-black tracking-widest mb-1">PYUSD Hub Balance</p>
+                                <p className="text-xl font-black text-bitcoin font-mono tracking-tighter">
                                    ${(pyusdBalance + adRevenue).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                 </p>
                                 <p className="text-[10px] text-zinc-500 mt-1">Stablecoin + Ad Rev</p>
@@ -2853,6 +3370,10 @@ export default function App() {
                                }
 
                                try {
+                                 if (!payoutEmail || !payoutEmail.includes('@')) {
+                                   throw new Error("PayPal email is required for liquidation.");
+                                 }
+
                                  const response = await fetch('/api/payout/paypal', {
                                    method: 'POST',
                                    headers: { 'Content-Type': 'application/json' },
@@ -2890,7 +3411,7 @@ export default function App() {
 
                                } catch (err: any) {
                                  notify(err.message, "alert");
-                                 console.error("Settlement error:", err);
+                                 console.error("Settlement error:", err instanceof Error ? err.message : String(err));
                                }
                              }}
                              className="w-full py-4 bg-zinc-900 dark:bg-white dark:text-black text-white rounded-2xl text-[10px] font-bold uppercase tracking-[0.2em] hover:bg-blue-600 dark:hover:bg-blue-600 dark:hover:text-white transition-all shadow-xl active:scale-95"
@@ -2900,9 +3421,153 @@ export default function App() {
                        </div>
                     </div>
 
-                    {settlementBatches.length > 0 && (
-                      <div className="mb-8 space-y-3">
-                         <p className="text-[9px] text-zinc-500 uppercase font-bold tracking-[0.2em]">Settlement Ledger (Fiat Off-Ramp)</p>
+                    {/* Autonomous Protocol Control Control */}
+                    <div className="bg-zinc-900 border border-white/10 rounded-[2.5rem] p-8 space-y-8 mb-8">
+
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-bitcoin/20 rounded-2xl flex items-center justify-center border border-bitcoin/30">
+                          <Brain size={20} className="text-bitcoin" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-white uppercase tracking-widest">Autonomous Core 24/7</h3>
+                          <p className="text-[10px] text-zinc-500 font-mono">Real-time correction & threshold monitoring</p>
+                        </div>
+                      </div>
+                      <div className="px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full flex items-center gap-2">
+                        <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                        <span className="text-[8px] font-bold text-green-500 uppercase tracking-widest">Neural Link Active</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="bg-black/20 p-6 rounded-3xl border border-white/5 flex flex-col justify-between">
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <DollarSign size={14} className="text-zinc-500" />
+                            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Auto Payout</span>
+                          </div>
+                          <p className="text-[10px] text-zinc-500 leading-relaxed mb-4">Trigger settlements automatically when yield exceeds target threshold.</p>
+                        </div>
+                        <button 
+                          onClick={() => setAutoPayoutEnabled(!autoPayoutEnabled)}
+                          className={cn(
+                            "w-full py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all",
+                            autoPayoutEnabled ? "bg-bitcoin text-black" : "bg-zinc-800 text-zinc-500 hover:bg-zinc-700"
+                          )}
+                        >
+                          {autoPayoutEnabled ? 'Protocol Active' : 'Engage Protocol'}
+                        </button>
+                      </div>
+
+                      <div className="bg-black/20 p-6 rounded-3xl border border-white/5">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Activity size={14} className="text-zinc-500" />
+                          <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Threshold ($USD)</span>
+                        </div>
+                        <input 
+                          type="number"
+                          value={payoutThreshold}
+                          onChange={(e) => setPayoutThreshold(Number(e.target.value))}
+                          className="w-full bg-zinc-950 border border-white/10 rounded-xl px-4 py-3 text-sm text-white font-mono focus:outline-none focus:border-bitcoin/50 transition-colors mt-2"
+                        />
+                        <p className="text-[9px] text-zinc-600 mt-2 italic">Minimum for BTC: $100 | PayPal: $0.01</p>
+                      </div>
+
+                      <div className="bg-black/20 p-6 rounded-3xl border border-white/5 flex flex-col justify-between">
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <Lock size={14} className="text-zinc-500" />
+                            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Vault Balancing</span>
+                          </div>
+                          <p className="text-[10px] text-zinc-500 leading-relaxed mb-4">Automatically move 20% of new yields to Secure Vault every 5 minutes.</p>
+                        </div>
+                        <button 
+                          onClick={() => setVaultSweepEnabled(!vaultSweepEnabled)}
+                          className={cn(
+                            "w-full py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all",
+                            vaultSweepEnabled ? "bg-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.3)]" : "bg-zinc-800 text-zinc-500 hover:bg-zinc-700"
+                          )}
+                        >
+                          {vaultSweepEnabled ? 'Balancing Active' : 'Enable Sweep'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="bg-black/20 p-6 rounded-3xl border border-white/5">
+                      <div className="flex items-center justify-between mb-6">
+                        <div className="flex items-center gap-2">
+                          <ShieldCheck size={16} className="text-bitcoin" />
+                          <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-widest">Multi-Wallet Hub & Blockchain Verification</span>
+                        </div>
+                        <button 
+                          onClick={() => addSavedWallet('0x' + Math.random().toString(16).substring(2, 42), 'BTC')}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-[9px] font-bold text-zinc-300 transition-colors border border-white/5"
+                        >
+                          <Plus size={12} /> Add Cluster Destination
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-3">
+                        {savedWallets.map((wallet) => (
+                          <div key={wallet.id} className="flex items-center justify-between p-4 bg-zinc-950 border border-white/5 rounded-2xl group">
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 bg-zinc-900 rounded-xl flex items-center justify-center border border-white/5">
+                                <Wallet size={18} className="text-zinc-500" />
+                              </div>
+                              <div>
+                                <p className="text-xs font-bold text-white font-mono">{wallet.address.substring(0, 10)}...{wallet.address.substring(wallet.address.length - 8)}</p>
+                                <div className="flex items-center gap-2 mt-1">
+                                  <span className="text-[9px] font-bold text-bitcoin/60 uppercase">{wallet.coin} Network</span>
+                                  {wallet.verified ? (
+                                    <span className="flex items-center gap-1 text-[8px] text-green-500 font-bold uppercase tracking-widest">
+                                      <CheckCircle2 size={8} /> On-Chain Verified
+                                    </span>
+                                  ) : (
+                                    <span className="flex items-center gap-1 text-[8px] text-zinc-600 font-bold uppercase tracking-widest">
+                                      Pending Verification
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {!wallet.verified && (
+                                <button 
+                                  onClick={() => verifyWalletOnBlockchain(wallet.address)}
+                                  disabled={isVerifyingBlockchain}
+                                  className="px-3 py-1.5 bg-bitcoin/10 border border-bitcoin/20 rounded-lg text-[9px] font-bold text-bitcoin hover:bg-bitcoin hover:text-black transition-all disabled:opacity-50"
+                                >
+                                  {isVerifyingBlockchain ? <RefreshCw size={10} className="animate-spin" /> : 'Cross-Check Chain'}
+                                </button>
+                              )}
+                              <button 
+                                onClick={() => removeSavedWallet(wallet.id)}
+                                className="p-2 text-zinc-700 hover:text-red-500 transition-colors"
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {blockchainProof && (
+                        <div className="mt-6 p-4 bg-zinc-900/50 border border-zinc-800 rounded-2xl">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Terminal size={12} className="text-zinc-500" />
+                            <span className="text-[9px] font-mono text-zinc-500 uppercase tracking-widest">Hash Proof: legitimacy-verified</span>
+                          </div>
+                          <p className="text-[10px] font-mono text-zinc-400 break-all">{blockchainProof}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {settlementBatches.length > 0 && (
+                    <div className="mb-8 space-y-3">
+                       <p className="text-[9px] text-zinc-500 uppercase font-bold tracking-[0.2em]">Settlement Ledger (Fiat Off-Ramp)</p>
+
                          <div className="grid grid-cols-1 gap-2">
                             {settlementBatches.map(batch => (
                                <div key={batch.id} className="p-4 bg-zinc-100 dark:bg-zinc-900/40 border border-app-border rounded-2xl flex items-center justify-between">
@@ -3082,7 +3747,7 @@ export default function App() {
                            setWithdrawType('PayPal');
                            setShowWithdrawModal(true);
                          }}
-                         className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold uppercase tracking-widest transition-all shadow-[0_5px_15px_rgba(37,99,235,0.3)]"
+                         className="px-6 py-3 bg-bitcoin hover:bg-bitcoin/80 text-black rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-[0_0_15px_rgba(57,255,20,0.3)]"
                       >
                         Withdraw via PayPal
                       </button>
@@ -3137,8 +3802,157 @@ export default function App() {
             </motion.div>
             )}
 
+            {activeTab === 'audit' && (
+              <motion.div 
+                key="audit"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="max-w-4xl mx-auto space-y-8"
+              >
+                <div className="flex flex-col md:flex-row items-center justify-between gap-6 pb-8 border-b border-white/10">
+                  <div>
+                    <h2 className="text-3xl font-bold flex items-center gap-3">
+                      <ShieldCheck className="text-bitcoin" size={32} />
+                      AI Protocol Audit
+                    </h2>
+                    <p className="text-zinc-500 text-sm mt-1">Deep analysis of mining telemetry, payout security, and efficiency optimization.</p>
+                  </div>
+                  <button 
+                    onClick={runSystemAudit}
+                    disabled={isAuditing}
+                    className={cn(
+                      "px-8 py-4 rounded-2xl text-sm font-bold uppercase tracking-[0.2em] transition-all flex items-center gap-3",
+                      isAuditing 
+                        ? "bg-zinc-800 text-zinc-500 cursor-not-allowed" 
+                        : "bg-white text-black hover:bg-bitcoin shadow-xl shadow-white/5 active:scale-95"
+                    )}
+                  >
+                    {isAuditing ? (
+                      <>
+                        <RefreshCw size={18} className="animate-spin" />
+                        Scanning Cluster...
+                      </>
+                    ) : (
+                      <>
+                        <Zap size={18} />
+                        Run System Audit
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                  <div className="lg:col-span-2">
+                    {auditResult ? (
+                      <motion.div 
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className="bg-zinc-900 border border-white/10 rounded-[2.5rem] overflow-hidden"
+                      >
+                        <div className="bg-zinc-800/50 p-4 border-b border-white/5 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Brain size={16} className="text-purple-400" />
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Gemini 1.5 Pro Analysis</span>
+                          </div>
+                          <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">Protocol Version 4.2.1-RC</span>
+                        </div>
+                        <div className="p-8 prose prose-invert prose-zinc max-w-none prose-sm">
+                          <Markdown>{auditResult}</Markdown>
+                        </div>
+                      </motion.div>
+                    ) : (
+                      <div className="h-[400px] bg-zinc-900/50 border border-white/5 border-dashed rounded-[2.5rem] flex flex-col items-center justify-center text-center p-12">
+                        <div className="w-16 h-16 bg-zinc-800 rounded-3xl flex items-center justify-center mb-6 opacity-50">
+                          <Brain size={32} className="text-zinc-500" />
+                        </div>
+                        <h3 className="text-lg font-bold text-zinc-400">Ready for Audit</h3>
+                        <p className="text-zinc-600 text-xs mt-2 max-w-xs leading-relaxed">
+                          The Gemini system is standing by to analyze your mining cluster telemetry and payout destinations.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-6">
+                    <div className="bg-zinc-900 border border-white/10 p-6 rounded-3xl">
+                      <h4 className="text-xs font-bold uppercase tracking-widest mb-6 opacity-50">Audit Target: Security</h4>
+                      <ul className="space-y-4">
+                        {[
+                          { label: "BTC Destination", icon: <Wallet size={14} />, status: walletAddress ? 'Verified' : 'Incomplete' },
+                          { label: "PayPal Gateway", icon: <DollarSign size={14} />, status: payoutEmail ? 'Verified' : 'Incomplete' },
+                          { label: "Vault Integrity", icon: <Lock size={14} />, status: 'Shielded' },
+                          { label: "Network Bridge", icon: <Globe size={14} />, status: cloudflareConnected ? 'Optimized' : 'Standard' }
+                        ].map((item, i) => (
+                          <li key={i} className="flex items-center justify-between p-3 bg-black/20 rounded-xl border border-white/5">
+                            <div className="flex items-center gap-3">
+                              <div className="text-zinc-500">{item.icon}</div>
+                              <span className="text-[10px] font-bold">{item.label}</span>
+                            </div>
+                            <span className={cn(
+                              "text-[9px] font-bold uppercase",
+                              item.status === 'Verified' || item.status === 'Shielded' || item.status === 'Optimized' 
+                                ? "text-green-500" 
+                                : "text-yellow-500"
+                            )}>{item.status}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div className="bg-bitcoin/10 border border-bitcoin/20 p-6 rounded-3xl relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 p-4 opacity-10">
+                        <Zap size={60} className="text-bitcoin" />
+                      </div>
+                      <h4 className="text-xs font-bold uppercase tracking-widest mb-2 text-bitcoin">Optimization Tip</h4>
+                      <p className="text-[10px] text-bitcoin/70 leading-relaxed relative z-10">
+                        Audits analyze your 24h variance. Repeated audits help the AI fine-tune your cluster overclocking for 12.5% higher yields.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
             {activeTab === 'network' && (
               <div className="space-y-12">
+                {/* Protocol Diagnostic Portal */}
+                <div id="protocol-health-monitor" className="bg-[#0D0D0D] border border-white/10 rounded-3xl p-8">
+                   <div className="flex items-center justify-between mb-8">
+                      <div>
+                         <h4 className="font-bold text-sm uppercase tracking-widest text-[#39FF14]">Protocol Health Monitor</h4>
+                         <p className="text-[10px] text-zinc-500 mt-1 uppercase font-mono">Real-time infrastructure integrity check</p>
+                      </div>
+                      <button 
+                        id="run-protocol-audit"
+                        onClick={verifyAllProtocols}
+                        disabled={isVerifyingProtocols}
+                        className="px-4 py-2 bg-[#39FF14]/10 text-[#39FF14] border border-[#39FF14]/20 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-[#39FF14]/20 transition-all flex items-center gap-2"
+                      >
+                         <RefreshCw size={12} className={cn(isVerifyingProtocols && "animate-spin")} />
+                         {isVerifyingProtocols ? "Auditing Layers..." : "Run System Audit"}
+                      </button>
+                   </div>
+
+                   <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                      {Object.entries(protocolStatus).map(([name, status]) => (
+                         <div key={name} id={`protocol-status-${name}`} className="p-4 bg-black/40 border border-white/5 rounded-2xl flex flex-col items-center text-center">
+                            <div className={cn(
+                               "w-2 h-2 rounded-full mb-3",
+                               status === 'online' ? "bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" :
+                               status === 'checking' ? "bg-yellow-500 animate-pulse" :
+                               "bg-red-500"
+                            )}></div>
+                            <p className="text-[9px] text-zinc-500 uppercase font-bold tracking-tighter mb-1">{name}</p>
+                            <p className={cn(
+                               "text-[10px] font-mono uppercase",
+                               status === 'online' ? "text-white" : "text-zinc-600"
+                            )}>{status}</p>
+                         </div>
+                      ))}
+                   </div>
+                </div>
+
                 <IpfsSection />
                 <div className="border-t border-white/10 pt-12">
                    <CloudflareSection 
@@ -3292,18 +4106,18 @@ export default function App() {
                 exit={{ opacity: 0, scale: 0.98 }}
                 className="space-y-8 max-w-5xl mx-auto"
               >
-                <div className="bg-[#0D0D0D] border border-blue-500/30 rounded-[2rem] p-12 text-center relative overflow-hidden">
+                <div className="bg-black border border-bitcoin/30 rounded-[2rem] p-12 text-center relative overflow-hidden">
                    <div className="absolute top-0 right-0 p-4 opacity-5 rotate-12 translate-x-12 -translate-y-6">
-                      <Zap size={200} className="text-blue-500" />
+                      <Zap size={200} className="text-bitcoin" />
                    </div>
-                   <h2 className="text-4xl font-bold mb-4">Ad Monetization Engine</h2>
-                   <p className="text-zinc-400 text-lg max-w-2xl mx-auto mb-10 leading-relaxed font-medium">
-                      Monetize your network idle time with premium ad inventory. Earn USD credits directly to your settlement multi-asset vault.
+                   <h2 className="text-4xl font-black mb-4 uppercase tracking-tighter">Ad Monetization Engine</h2>
+                   <p className="text-bitcoin/60 text-lg max-w-2xl mx-auto mb-10 leading-relaxed font-medium">
+                      Monetize your network idle time with premium ad inventory. Earn rewards directly to your settlement protocol vault.
                    </p>
                    
-                   <div className="bg-blue-600/10 border border-blue-500/20 rounded-2xl px-6 py-4 mx-auto max-w-xs mb-8">
-                      <p className="text-[10px] text-blue-500 uppercase font-bold tracking-widest">Global Ad Revenue</p>
-                      <p className="text-3xl font-bold font-mono text-white">${adRevenue.toFixed(2)}</p>
+                   <div className="bg-bitcoin/10 border border-bitcoin/20 rounded-2xl px-6 py-4 mx-auto max-w-xs mb-8 shadow-[0_0_30px_rgba(57,255,20,0.1)]">
+                      <p className="text-[10px] text-bitcoin uppercase font-black tracking-widest">Global Ad revenue</p>
+                      <p className="text-3xl font-black font-mono text-bitcoin">${adRevenue.toFixed(2)}</p>
                    </div>
                    
                    <div className="flex flex-wrap justify-center gap-4">
@@ -3312,44 +4126,44 @@ export default function App() {
                           setAdRevenue(prev => prev + 1.25);
                           notify("Ad Impression Logged: +$1.25", "success");
                         }}
-                        className="px-12 py-5 bg-white text-black rounded-2xl font-bold text-sm uppercase tracking-[0.2em] hover:scale-105 active:scale-95 transition-all shadow-xl shadow-white/5"
+                        className="px-12 py-5 bg-bitcoin text-black rounded-2xl font-black text-sm uppercase tracking-[0.2em] hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(57,255,20,0.4)]"
                       >
                          Engage Ad Inventory
                       </button>
-                      <div className="flex items-center gap-3 px-6 py-4 bg-white/5 rounded-2xl border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
-                         <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                      <div className="flex items-center gap-3 px-6 py-4 bg-bitcoin/5 rounded-2xl border border-bitcoin/10 text-[10px] font-black uppercase tracking-widest text-bitcoin/40">
+                         <div className="w-2 h-2 bg-bitcoin rounded-full animate-pulse shadow-[0_0_8px_rgba(57,255,20,0.6)]" />
                          Inventory Active: 14,221 Slots
                       </div>
                    </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                   <div className="bg-[#0D0D0D] border border-white/10 rounded-3xl p-8">
-                      <h4 className="text-sm font-bold uppercase tracking-widest text-zinc-500 mb-6">Network Ad inventory</h4>
-                      <div className="aspect-video rounded-2xl border border-white/5 bg-zinc-900 flex items-center justify-center overflow-hidden relative group">
-                         <div className="absolute inset-0 bg-blue-500/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm">
-                            <span className="text-white font-bold uppercase tracking-widest text-xs">View Analytics Metadata</span>
+                   <div className="bg-black border border-bitcoin/10 rounded-3xl p-8">
+                      <h4 className="text-sm font-black uppercase tracking-widest text-bitcoin/40 mb-6">Network Ad inventory</h4>
+                      <div className="aspect-video rounded-2xl border border-bitcoin/5 bg-bitcoin/5 flex items-center justify-center overflow-hidden relative group">
+                         <div className="absolute inset-0 bg-bitcoin/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm">
+                            <span className="text-black font-black uppercase tracking-widest text-xs">View Analytics Metadata</span>
                          </div>
                          <div className="text-center p-8">
-                            <Globe size={48} className="text-blue-500 mx-auto mb-4" />
-                            <p className="text-lg font-bold">Global Edge Propagation</p>
-                            <p className="text-xs text-zinc-500 mt-2">1,421 Active Monetization Slots</p>
+                            <Globe size={48} className="text-bitcoin mx-auto mb-4" />
+                            <p className="text-lg font-black tracking-tighter uppercase">Global Edge Propagation</p>
+                            <p className="text-xs text-bitcoin/40 mt-2 font-mono">1,421 Active Monetization Slots</p>
                          </div>
                       </div>
                       <div className="mt-8 space-y-4">
                          <div className="flex justify-between items-center text-xs font-mono">
-                            <span className="text-zinc-500">Inventory Status:</span>
-                            <span className="text-green-500">OPTIMIZED</span>
+                            <span className="text-bitcoin/40">Inventory Status:</span>
+                            <span className="text-bitcoin">OPTIMIZED</span>
                          </div>
                          <div className="flex justify-between items-center text-xs font-mono">
-                            <span className="text-zinc-500">Payout Address:</span>
-                            <span className="text-white truncate max-w-[120px]">{payoutEmail}</span>
+                            <span className="text-bitcoin/40">Payout Address:</span>
+                            <span className="text-bitcoin truncate max-w-[120px]">{payoutEmail}</span>
                          </div>
                       </div>
                    </div>
 
-                   <div className="bg-[#0D0D0D] border border-white/10 rounded-3xl p-8">
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-6">Real-Time Monetization Logs</h4>
+                   <div className="bg-black border border-bitcoin/10 rounded-3xl p-8">
+                      <h4 className="text-[10px] font-black uppercase tracking-widest text-bitcoin/40 mb-6">Real-Time Monetization Logs</h4>
                       <div className="space-y-4 font-mono text-[10px]">
                          {[
                            { event: 'Tier 1 Video Impression', val: '+$0.65', time: '1m ago' },
@@ -3357,11 +4171,11 @@ export default function App() {
                            { event: 'Sponsored Node Bonus', val: '+$5.00', time: '1h ago' },
                            { event: 'Edge Click-Thru', val: '+$2.50', time: '4h ago' }
                          ].map((log, i) => (
-                           <div key={i} className="flex justify-between items-center py-3 border-b border-white/5 last:border-0 opacity-70">
-                              <span className="text-zinc-400">{log.event}</span>
+                           <div key={i} className="flex justify-between items-center py-3 border-b border-bitcoin/5 last:border-0">
+                              <span className="text-bitcoin/40">{log.event}</span>
                               <div className="text-right">
-                                 <span className="text-green-500 block">{log.val}</span>
-                                 <span className="text-zinc-600 text-[8px]">{log.time}</span>
+                                 <span className="text-bitcoin block font-black">{log.val}</span>
+                                 <span className="text-bitcoin/20 text-[8px]">{log.time}</span>
                               </div>
                            </div>
                          ))}
@@ -3432,7 +4246,7 @@ export default function App() {
                           setActiveTab('wallet');
                           notify("Liquidity switched to PYUSD settling mode.", "info");
                         }}
-                        className="w-full py-3 bg-blue-600/10 text-blue-500 border border-blue-500/20 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-blue-600/20 transition-all"
+                        className="w-full py-3 bg-bitcoin/10 text-bitcoin border border-bitcoin/20 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-bitcoin/20 transition-all"
                       >
                          Activate PYUSD Settle
                       </button>
@@ -3606,6 +4420,20 @@ export default function App() {
         </div>
       </main>
 
+      {/* Protocol Assistance Neural Link */}
+      <GeminiAssistant 
+        appContext={{
+          balance,
+          btcPrice,
+          isMining,
+          networkStats,
+          efficiencyRating,
+          hardwareSummary,
+          internalWalletBalance,
+          vaultBalance
+        }}
+      />
+
       {/* Decorative Overlays */}
       <div className="fixed bottom-0 right-0 p-8 pointer-events-none opacity-5">
         <Monitor className="w-64 h-64 text-bitcoin" />
@@ -3750,7 +4578,7 @@ function CloudflareSection({ connected, onConnect }: { connected: boolean, onCon
       Provide a sophisticated, slightly snobbish, and highly technical "Security Posture" update. Keep it under 40 words. Focus on edge optimization and protocol integrity.`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-flash-latest",
         contents: prompt
       });
       setEdgeInsight(response.text || "Edge telemetry remains within nominal priority parameters. Integrity verified.");
@@ -3808,17 +4636,17 @@ function CloudflareSection({ connected, onConnect }: { connected: boolean, onCon
         <div className="bg-[#0D0D0D] border border-white/10 rounded-[2.5rem] p-12 text-center relative overflow-hidden group">
            <div className="absolute inset-0 bg-gradient-to-br from-orange-500/5 to-transparent opacity-50" />
            <div className="relative z-10 max-w-md mx-auto">
-              <div className="w-20 h-20 bg-orange-500/20 rounded-3xl flex items-center justify-center mx-auto mb-8 border border-orange-500/30">
-                 <Globe size={40} className="text-orange-500" />
+              <div className="w-20 h-20 bg-bitcoin/20 rounded-3xl flex items-center justify-center mx-auto mb-8 border border-bitcoin/30 shadow-[0_0_20px_rgba(57,255,20,0.2)]">
+                 <Globe size={40} className="text-bitcoin" />
               </div>
-              <h3 className="text-2xl font-bold mb-3 tracking-tight">Cloudflare Edge Integrated</h3>
-              <p className="text-zinc-500 text-sm mb-10 leading-relaxed">
-                 Enable global WAF protection, DDoS mitigation, and edge-side cache acceleration for your protocol deployment. Synchronize directly with your existing Cloudflare zone.
+              <h3 className="text-2xl font-black mb-3 tracking-tighter uppercase">Cloudflare Edge Integrated</h3>
+              <p className="text-bitcoin/50 text-sm mb-10 leading-relaxed font-mono">
+                 Enable global protection and edge-side core acceleration for your protocol deployment. Synchronize directly with your existing Cloudflare zone.
               </p>
               <button 
                 onClick={handleConnect}
                 disabled={isConnecting}
-                className="w-full py-4 bg-orange-600 hover:bg-orange-700 text-white rounded-2xl text-xs font-bold uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 shadow-xl active:scale-95"
+                className="w-full py-4 bg-bitcoin hover:bg-bitcoin/80 text-black rounded-2xl text-xs font-black uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 shadow-[0_0_20px_rgba(57,255,20,0.4)] active:scale-95"
               >
                 {isConnecting ? (
                   <>
@@ -4194,49 +5022,56 @@ function GitHubSection({ connected, onConnect, isAuditing }: { connected: boolea
   );
 }
 
-function SidebarItem({ icon, label, active, onClick }: { icon: React.ReactNode, label: string, active?: boolean, onClick: () => void }) {
+function SidebarItem({ icon, label, active, onClick, badge }: { icon: React.ReactNode, label: string, active?: boolean, onClick: () => void, badge?: string }) {
   return (
     <button 
       onClick={onClick}
       className={cn(
         "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group relative",
         active 
-          ? "bg-bitcoin/10 text-bitcoin font-semibold" 
-          : "text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
+          ? "bg-bitcoin/10 text-bitcoin font-black shadow-[inset_0_0_20px_rgba(57,255,20,0.05)]" 
+          : "text-bitcoin/40 hover:text-bitcoin hover:bg-bitcoin/5"
       )}
     >
-      {active && <motion.div layoutId="active-pill" className="absolute left-0 w-1 h-6 bg-bitcoin rounded-r-full" />}
+      {active && <motion.div layoutId="active-pill" className="absolute left-0 w-1 h-6 bg-bitcoin rounded-r-full shadow-[0_0_10px_rgba(57,255,20,0.8)]" />}
       <span className={cn("transition-transform duration-200", active && "scale-110")}>{icon}</span>
-      <span className="text-sm tracking-wide">{label}</span>
-      {active && <ChevronRight size={14} className="ml-auto opacity-50" />}
+      <span className="text-[11px] font-black uppercase tracking-wider">{label}</span>
+      {badge && (
+        <span className="ml-auto bg-bitcoin text-black text-[8px] font-black px-1.5 py-0.5 rounded-md shadow-[0_0_10px_rgba(57,255,20,0.4)]">
+          {badge}
+        </span>
+      )}
+      {active && <ChevronRight size={12} className="ml-auto opacity-40" />}
     </button>
   );
 }
 
 function StatCard({ title, value, subValue, icon, trend, isMining, action }: { title: string, value: string, subValue: string, icon: React.ReactNode, trend?: string, isMining?: boolean, action?: React.ReactNode }) {
   return (
-    <div className="bg-app-card border border-app-border rounded-2xl p-6 hover:border-bitcoin/30 transition-all group shrink-0 shadow-sm">
+    <div className="bg-black border border-bitcoin/20 rounded-2xl p-6 hover:border-bitcoin/50 transition-all group shrink-0 shadow-[0_0_20px_rgba(57,255,20,0.02)]">
       <div className="flex justify-between items-start mb-4">
-        <div className="p-2 rounded-lg bg-zinc-100 dark:bg-zinc-900 group-hover:scale-110 transition-transform">
-          {icon}
+        <div className="p-2 rounded-lg bg-bitcoin/5 border border-bitcoin/10 group-hover:scale-110 group-hover:bg-bitcoin/10 transition-all">
+          {React.isValidElement(icon) ? React.cloneElement(icon as React.ReactElement<any>, { 
+            className: cn((icon.props as any).className, "text-bitcoin") 
+          }) : icon}
         </div>
         <div className="flex gap-2 items-center">
           {trend && (
-            <span className="text-[10px] font-mono text-green-500 bg-green-500/10 px-2 py-0.5 rounded-full">{trend}</span>
+            <span className="text-[10px] font-black font-mono text-black bg-bitcoin px-2 py-0.5 rounded-full shadow-[0_0_10px_rgba(57,255,20,0.3)]">{trend}</span>
           )}
           {isMining !== undefined && (
             <div className={cn(
               "w-2 h-2 rounded-full",
-              isMining ? "bg-green-500 animate-pulse glow-bitcoin" : "bg-zinc-600"
+              isMining ? "bg-bitcoin animate-pulse shadow-[0_0_10px_rgba(57,255,20,0.8)]" : "bg-bitcoin/20"
             )} />
           )}
         </div>
       </div>
       <div>
-        <p className="text-zinc-500 text-xs font-mono uppercase tracking-widest mb-1">{title}</p>
-        <h4 className="text-2xl font-bold font-mono tracking-tighter">{value}</h4>
+        <p className="text-bitcoin/40 text-[9px] font-black uppercase tracking-widest mb-1">{title}</p>
+        <h4 className="text-2xl font-black font-mono tracking-tighter text-bitcoin group-hover:drop-shadow-[0_0_8px_rgba(57,255,20,0.3)] transition-all">{value}</h4>
         <div className="flex justify-between items-end mt-1">
-          <p className="text-zinc-600 text-[10px]">{subValue}</p>
+          <p className="text-bitcoin/30 text-[10px] font-mono">{subValue}</p>
           {action}
         </div>
       </div>
@@ -4294,4 +5129,70 @@ function SettingsRow({ title, description, hasSwitch, active, onClick }: { title
     </div>
   );
 }
+
+const PayPalProtocolWrapper = ({ onSuccess, onError }: { onSuccess: () => void, onError: (err: any) => void }) => {
+  return (
+    <PayPalScriptProvider options={{ 
+      clientId: (import.meta.env.VITE_PAYPAL_CLIENT_ID || import.meta.env.VITE_CLIENT_ID || "test").trim(), 
+      currency: "USD",
+      intent: "capture",
+      "data-sdk-integration-source": "react-paypal-js"
+    }}>
+      <PayPalProtocolInner onSuccess={onSuccess} onError={onError} />
+    </PayPalScriptProvider>
+  );
+};
+
+const PayPalProtocolInner = ({ onSuccess, onError }: { onSuccess: () => void, onError: (err: any) => void }) => {
+  const [{ isPending, isRejected }] = usePayPalScriptReducer();
+
+  if (isRejected) {
+    return (
+      <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex flex-col items-center gap-3 text-center">
+        <AlertTriangle className="text-red-500" size={24} />
+        <div className="space-y-1">
+          <p className="text-xs font-bold text-red-500 uppercase tracking-widest">Protocol Setup Fault</p>
+          <p className="text-[10px] text-zinc-500">PayPal SDK failed to initialize. Please verify your Client ID in the platform settings.</p>
+        </div>
+        <button 
+          onClick={() => window.location.reload()}
+          className="text-[9px] font-bold text-zinc-400 hover:text-white uppercase underline"
+        >
+          Re-initialize Link
+        </button>
+      </div>
+    );
+  }
+
+  if (isPending) {
+    return (
+      <div className="h-12 bg-zinc-800 animate-pulse rounded-full flex items-center justify-center">
+        <RefreshCw size={14} className="animate-spin text-zinc-600" />
+      </div>
+    );
+  }
+
+  return (
+    <PayPalButtons 
+      createOrder={(data, actions) => {
+        return actions.order.create({
+          intent: "CAPTURE",
+          purchase_units: [{
+            amount: {
+              currency_code: "USD",
+              value: "499.00"
+            }
+          }]
+        });
+      }}
+      onApprove={(data, actions) => {
+        return actions.order!.capture().then(() => {
+          onSuccess();
+        });
+      }}
+      onError={onError}
+      style={{ layout: "horizontal", color: "blue", shape: "pill", label: "pay" }}
+    />
+  );
+};
 

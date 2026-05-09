@@ -26,15 +26,19 @@ const wagmiAdapter = new WagmiAdapter({
 })
 
 // 4. Create modal
-createAppKit({
-  adapters: [wagmiAdapter],
-  networks,
-  projectId,
-  metadata,
-  features: {
-    analytics: true
-  }
-})
+try {
+  createAppKit({
+    adapters: [wagmiAdapter],
+    networks,
+    projectId,
+    metadata,
+    features: {
+      analytics: true
+    }
+  })
+} catch (e) {
+  console.warn('AppKit initialization failed:', e);
+}
 
 const queryClient = new QueryClient()
 
